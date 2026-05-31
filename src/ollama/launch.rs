@@ -64,17 +64,26 @@ pub fn agent_running(agent: &Agent) -> bool {
 
 // ───────────────────────── platform helpers ─────────────────────────
 
+/// Strip characters that could be interpreted as shell metacharacters from a URL.
+fn shell_safe_url(url: &str) -> String {
+    url.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || "://.\\-_@%+=?&#[]".contains(*c))
+        .collect()
+}
+
 /// Run a shell command line in a new terminal window.
 /// If `ollama_host` is provided it is forwarded as `OLLAMA_HOST` so the agent
 /// connects to the right server.
 fn spawn_in_terminal(cmd: &str, ollama_host: Option<&str>) -> Result<()> {
     // Prepend OLLAMA_HOST=<url> to the command string for each platform.
+    // The host is sanitized before interpolation to guard against shell injection.
     let full_cmd: String;
     let cmd = if let Some(host) = ollama_host {
+        let safe = shell_safe_url(host);
         #[cfg(target_os = "windows")]
-        { full_cmd = format!("set OLLAMA_HOST={host} && {cmd}"); }
+        { full_cmd = format!("set OLLAMA_HOST={safe} && {cmd}"); }
         #[cfg(not(target_os = "windows"))]
-        { full_cmd = format!("OLLAMA_HOST={host} {cmd}"); }
+        { full_cmd = format!("OLLAMA_HOST={safe} {cmd}"); }
         full_cmd.as_str()
     } else {
         cmd

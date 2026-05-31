@@ -64,9 +64,22 @@ struct LocalModel {
     name: String,
 }
 
+/// Build the `/api/tags` URL for a given base, tolerating a trailing slash.
+fn tags_url(base_url: &str) -> String {
+    format!("{}/api/tags", base_url.trim_end_matches('/'))
+}
+
+/// Parse an `/api/tags` response body into a sorted list of model names.
+fn parse_tags(body: &str) -> Result<Vec<Model>> {
+    let parsed: TagsResponse = serde_json::from_str(body).context("invalid /api/tags response")?;
+    let mut models: Vec<Model> = parsed.models.into_iter().map(|m| Model { name: m.name }).collect();
+    models.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(models)
+}
+
 /// Fetch the list of models available on a local/remote Ollama server.
 pub async fn list_local_models(base_url: &str) -> Result<Vec<Model>> {
-    let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
+    let url = tags_url(base_url);
     let resp = reqwest::Client::new()
         .get(&url)
         .timeout(Duration::from_secs(5))
@@ -76,10 +89,8 @@ pub async fn list_local_models(base_url: &str) -> Result<Vec<Model>> {
     if !resp.status().is_success() {
         anyhow::bail!("server returned {}", resp.status());
     }
-    let parsed: TagsResponse = resp.json().await.context("invalid /api/tags response")?;
-    let mut models: Vec<Model> = parsed.models.into_iter().map(|m| Model { name: m.name }).collect();
-    models.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(models)
+    let body = resp.text().await.context("could not read /api/tags response")?;
+    parse_tags(&body)
 }
 
 /// Test connectivity to a local/remote Ollama server by hitting its `/api/version` endpoint.
@@ -105,7 +116,7 @@ pub async fn test_connection(base_url: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::to_cloud_ref;
+    use super::{parse_tags, tags_url, to_cloud_ref};
 
     #[test]
     fn cloud_ref_rule() {
@@ -114,5 +125,31 @@ mod tests {
         assert_eq!(to_cloud_ref("deepseek-v4-pro"), "deepseek-v4-pro:cloud");
         assert_eq!(to_cloud_ref("gemma4:31b-cloud"), "gemma4:31b-cloud");
         assert_eq!(to_cloud_ref("deepseek-v4-pro:cloud"), "deepseek-v4-pro:cloud");
+    }
+
+    #[test]
+    fn tags_url_handles_trailing_slash() {
+        assert_eq!(tags_url("http://localhost:11434"), "http://localhost:11434/api/tags");
+        assert_eq!(tags_url("http://localhost:11434/"), "http://localhost:11434/api/tags");
+        assert_eq!(tags_url("http://host:11434///"), "http://host:11434/api/tags");
+    }
+
+    #[test]
+    fn parse_tags_sorts_and_extracts_names() {
+        let body = r#"{"models":[{"name":"llama3:8b","size":1},{"name":"gemma:2b"}]}"#;
+        let names: Vec<String> = parse_tags(body).unwrap().into_iter().map(|m| m.name).collect();
+        assert_eq!(names, vec!["gemma:2b", "llama3:8b"]);
+    }
+
+    #[test]
+    fn parse_tags_empty_list() {
+        let names = parse_tags(r#"{"models":[]}"#).unwrap();
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn parse_tags_rejects_malformed_body() {
+        assert!(parse_tags("not json").is_err());
+        assert!(parse_tags(r#"{"unexpected":true}"#).is_err());
     }
 }

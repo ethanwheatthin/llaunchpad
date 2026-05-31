@@ -70,6 +70,24 @@ fn make_model_items(local: &[String], cloud: &[String]) -> Vec<ModelItem> {
     items
 }
 
+fn cloud_names_from_ui(ui: &AppWindow) -> Vec<String> {
+    (0..ui.get_models().row_count())
+        .filter_map(|i| {
+            let m = ui.get_models().row_data(i)?;
+            if !m.is_local { Some(m.name.to_string()) } else { None }
+        })
+        .collect()
+}
+
+fn selected_model_name(ui: &AppWindow) -> Option<String> {
+    let idx = ui.get_sel_model_index();
+    if idx >= 0 {
+        ui.get_models().row_data(idx as usize).map(|m| m.name.to_string())
+    } else {
+        None
+    }
+}
+
 /// Fetch agents, their running state, and the cloud model list.
 async fn fetch_all() -> anyhow::Result<(Vec<Agent>, Vec<bool>, Vec<String>)> {
     let agents = list_agents().await?;
@@ -95,6 +113,9 @@ fn main() -> anyhow::Result<()> {
 
     // shared local models (fetched after a successful connection test)
     let local_models: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    // monotonic counter — incremented on each Test click so stale responses are discarded
+    let test_gen: Arc<std::sync::atomic::AtomicU64> =
+        Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     // restore ollama_host from prefs
     ui.set_ollama_host(prefs.ollama_host.clone().into());
@@ -114,53 +135,80 @@ fn main() -> anyhow::Result<()> {
     {
         let ui_weak = ui.as_weak();
         let local_models = local_models.clone();
+        let test_gen = test_gen.clone();
         ui.on_test_connection(move |url| {
             let url = url.to_string();
+            // persist the host immediately so it survives exit even without a launch
+            let mut saved = config::load();
+            saved.ollama_host = url.clone();
+            config::save(&saved);
+
+            let gen = test_gen.fetch_add(1, Ordering::SeqCst) + 1;
             let ui_weak = ui_weak.clone();
             let local_models = local_models.clone();
+            let test_gen = test_gen.clone();
             tokio::spawn(async move {
                 match test_connection(&url).await {
                     Ok(info) => {
-                        // fetch local models from the confirmed-live server
-                        let fetched = list_local_models(&url)
-                            .await
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(|m| m.name)
-                            .collect::<Vec<_>>();
-                        let count = fetched.len();
-                        *local_models.lock().unwrap() = fetched.clone();
-
-                        let msg = if count > 0 {
-                            format!(
-                                "✓ {info} · {count} local model{}",
-                                if count == 1 { "" } else { "s" }
-                            )
-                        } else {
-                            format!("✓ {info} · no local models pulled")
-                        };
-
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = ui_weak.upgrade() {
-                                // read current cloud list, then rebuild with new local entries
-                                let cloud: Vec<String> = (0..ui.get_models().row_count())
-                                    .filter_map(|i| {
-                                        let m = ui.get_models().row_data(i)?;
-                                        if !m.is_local { Some(m.name.to_string()) } else { None }
-                                    })
-                                    .collect();
-                                let items = make_model_items(&fetched, &cloud);
-                                ui.set_models(ModelRc::new(VecModel::from(items)));
-                                ui.set_status(msg.into());
-                                ui.set_status_kind(1);
+                        match list_local_models(&url).await {
+                            Ok(local_list) => {
+                                let fetched: Vec<String> =
+                                    local_list.into_iter().map(|m| m.name).collect();
+                                let count = fetched.len();
+                                *local_models.lock().unwrap() = fetched.clone();
+                                let msg = if count > 0 {
+                                    format!(
+                                        "✓ {info} · {count} local model{}",
+                                        if count == 1 { "" } else { "s" }
+                                    )
+                                } else {
+                                    format!("✓ {info} · no local models")
+                                };
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if test_gen.load(Ordering::SeqCst) != gen { return; }
+                                    if let Some(ui) = ui_weak.upgrade() {
+                                        let cloud = cloud_names_from_ui(&ui);
+                                        let prev = selected_model_name(&ui);
+                                        let items = make_model_items(&fetched, &cloud);
+                                        let new_idx = prev.as_deref()
+                                            .and_then(|n| items.iter().position(|m| m.name == n))
+                                            .map(|i| i as i32);
+                                        ui.set_models(ModelRc::new(VecModel::from(items)));
+                                        if let Some(idx) = new_idx {
+                                            ui.set_sel_model_index(idx);
+                                        }
+                                        ui.set_status(msg.into());
+                                        ui.set_status_kind(1);
+                                    }
+                                });
                             }
-                        });
+                            Err(e) => {
+                                *local_models.lock().unwrap() = Vec::new();
+                                let msg = format!("✓ {info} · model list unavailable: {e}");
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if test_gen.load(Ordering::SeqCst) != gen { return; }
+                                    if let Some(ui) = ui_weak.upgrade() {
+                                        let cloud = cloud_names_from_ui(&ui);
+                                        ui.set_models(ModelRc::new(VecModel::from(
+                                            make_model_items(&[], &cloud),
+                                        )));
+                                        ui.set_status(msg.into());
+                                        ui.set_status_kind(1);
+                                    }
+                                });
+                            }
+                        }
                     }
                     Err(e) => {
                         *local_models.lock().unwrap() = Vec::new();
                         let msg = format!("✗ {e}");
                         let _ = slint::invoke_from_event_loop(move || {
+                            if test_gen.load(Ordering::SeqCst) != gen { return; }
                             if let Some(ui) = ui_weak.upgrade() {
+                                let cloud = cloud_names_from_ui(&ui);
+                                ui.set_models(ModelRc::new(VecModel::from(
+                                    make_model_items(&[], &cloud),
+                                )));
                                 ui.set_status(msg.into());
                                 ui.set_status_kind(2);
                             }

@@ -312,6 +312,14 @@ component ThemedInput {
                 accepted => { root.accepted(self.text); }
             }
         }
+        // placeholder overlay — visible when the field is empty and unfocused
+        if root.text == "" && !ti.has-focus: Text {
+            x: 10px;
+            y: (parent.height - self.height) / 2;
+            text: root.placeholder-text;
+            color: Theme.subtext.with-alpha(0.5);
+            font-size: 13px;
+        }
     }
 }
 
@@ -414,9 +422,12 @@ export component AppWindow inherits Window {
     min-height: 440px;
     max-height: 440px;
     background: Theme.bg;
-    // Ensure Unicode glyphs (▾ ↻ ✕ ● ✓ ✗) render on every platform.
-    // Segoe UI covers them on Windows; macOS/Linux fall back to their system font.
-    default-font-family: "Segoe UI";
+    // "Segoe UI Symbol" is used as the default because it contains the Unicode
+    // glyphs used as icons (▾ ↻ ✕ ● ✓ ✗) while still rendering Latin text
+    // acceptably. femtovg does not do automatic font fallback, so without this
+    // those characters appear as empty boxes on Windows.
+    // On macOS/Linux this font will not be found; the system default is used.
+    default-font-family: "Segoe UI Symbol";
 
     in property <[AgentItem]> agents;
     in property <[string]> agent-names;
@@ -531,7 +542,7 @@ export component AppWindow inherits Window {
                         text: "ollama launch";
                         color: Theme.text;
                         font-size: 16px;
-                        font-family: "Menlo, Consolas, DejaVu Sans Mono, monospace";
+                        font-family: "Consolas";
                         vertical-alignment: center;
                     }
                     agent-select := AgentSelect {
