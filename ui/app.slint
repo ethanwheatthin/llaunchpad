@@ -437,7 +437,7 @@ export component AppWindow inherits Window {
     property <string> agent-token: (sel-agent-index >= 0 && sel-agent-index < agents.length) ? agents[sel-agent-index].name : "";
     property <bool> agent-running: (sel-agent-index >= 0 && sel-agent-index < agents.length) ? agents[sel-agent-index].running : false;
     property <bool> agent-restorable: (sel-agent-index >= 0 && sel-agent-index < agents.length) ? agents[sel-agent-index].restorable : false;
-    property <string> model-val: (sel-model-index >= 0 && sel-model-index < models.length) ? models[sel-model-index] : "";
+    property <string> model-val: (sel-model-index >= 0 && sel-model-index < models.length) ? models[sel-model-index].name : "";
 
     callback launch(int /*agent index*/, string /*model*/);
     callback restore(int /*agent index*/);

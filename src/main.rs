@@ -6,11 +6,9 @@ mod ollama;
 slint::include_modules!();
 
 use ollama::{
-    launch_agent, list_agents, list_cloud_models, restore_agent, restore_available,
-    running_states, Agent,
+    launch_agent, list_agents, list_cloud_models, list_local_models, restore_agent,
+    restore_available, running_states, test_connection, Agent,
 };
-use slint::{ModelRc, SharedString, VecModel};
-use ollama::{list_agents, list_cloud_models, list_local_models, test_connection, launch_agent, running_states, Agent};
 use slint::{Model, ModelRc, SharedString, VecModel};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -124,7 +122,8 @@ fn main() -> anyhow::Result<()> {
                 match test_connection(&url).await {
                     Ok(info) => {
                         // fetch local models from the confirmed-live server
-                        let fetched = list_local_models(&url).await
+                        let fetched = list_local_models(&url)
+                            .await
                             .unwrap_or_default()
                             .into_iter()
                             .map(|m| m.name)
@@ -133,15 +132,17 @@ fn main() -> anyhow::Result<()> {
                         *local_models.lock().unwrap() = fetched.clone();
 
                         let msg = if count > 0 {
-                            format!("✓ {info} · {count} local model{}", if count == 1 { "" } else { "s" })
+                            format!(
+                                "✓ {info} · {count} local model{}",
+                                if count == 1 { "" } else { "s" }
+                            )
                         } else {
                             format!("✓ {info} · no local models pulled")
                         };
 
-                        // push fresh model items to the UI (local first)
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = ui_weak.upgrade() {
-                                // read the current cloud model list from existing items
+                                // read current cloud list, then rebuild with new local entries
                                 let cloud: Vec<String> = (0..ui.get_models().row_count())
                                     .filter_map(|i| {
                                         let m = ui.get_models().row_data(i)?;
@@ -156,7 +157,6 @@ fn main() -> anyhow::Result<()> {
                         });
                     }
                     Err(e) => {
-                        // clear local models on connection failure
                         *local_models.lock().unwrap() = Vec::new();
                         let msg = format!("✗ {e}");
                         let _ = slint::invoke_from_event_loop(move || {
@@ -178,12 +178,10 @@ fn main() -> anyhow::Result<()> {
         ui.on_launch(move |idx, model| {
             let agent = store.lock().unwrap().get(idx as usize).cloned();
             let model = model.to_string();
-            // read the current host value from the UI
             let host = ui_weak
                 .upgrade()
                 .map(|ui| ui.get_ollama_host().to_string())
                 .unwrap_or_default();
-            // persist last-used selection including host
             if let Some(a) = &agent {
                 config::save(&config::Prefs {
                     agent: a.name.clone(),
@@ -192,7 +190,6 @@ fn main() -> anyhow::Result<()> {
                 });
             }
             let ui_weak = ui_weak.clone();
-            // launch is blocking (process spawn + quit delay); use a thread
             std::thread::spawn(move || {
                 let host_opt = if host.is_empty() { None } else { Some(host.as_str()) };
                 let (msg, kind) = match agent {
@@ -238,6 +235,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // ---- shared refresh routine ----
+    // last_lists: (agent_signatures, cloud_model_names) — only push UI updates on change
     let do_refresh: Arc<dyn Fn() + Send + Sync> = {
         let store = agents_store.clone();
         let ui_weak = ui.as_weak();
@@ -266,69 +264,57 @@ fn main() -> anyhow::Result<()> {
                     Ok((agents, running, cloud_names)) => {
                         *store.lock().unwrap() = agents.clone();
                         let items = make_agent_items(&agents, &running);
-                        let agent_names_str: Vec<String> =
-                            agents.iter().map(|a| a.display.clone()).collect();
-                        // signature includes running/restorable so we only repaint on real change
+
+                        // use a content-hash so we only repaint on real changes
                         let agent_sig: Vec<String> = items
                             .iter()
                             .map(|it| format!("{}|{}|{}", it.name, it.running, it.restorable))
                             .collect();
 
-                        // only replace the UI models when content actually changes —
-                        // otherwise rebuilding the rows wipes the mouse hover in an open list
                         let (agents_changed, models_changed) = {
-
-                        // only push the combo lists when they actually change to avoid
-                        // resetting the user's selection
-                        let lists_changed = {
                             let mut g = last_lists.lock().unwrap();
                             let ac = g.0 != agent_sig;
-                            let mc = g.1 != models;
-                            if ac {
-                                g.0 = agent_sig.clone();
-                            }
-                            if mc {
-                                g.1 = models.clone();
-                            let changed = g.0 != agent_names_str || g.1 != cloud_names;
-                            if changed {
-                                *g = (agent_names_str.clone(), cloud_names.clone());
-                            }
+                            let mc = g.1 != cloud_names;
+                            if ac { g.0 = agent_sig; }
+                            if mc { g.1 = cloud_names.clone(); }
                             (ac, mc)
                         };
 
-                        // snapshot local models while we hold the lock
                         let local_snap = local_models.lock().unwrap().clone();
 
                         // restore last-used selection once, after the lists are known
                         let first_apply = !prefs_applied.swap(true, Ordering::SeqCst);
-                        let restore = if first_apply {
-                            let ai = agents.iter().position(|a| a.name == prefs.agent).map(|i| i as i32);
-                            // find the saved model name in the merged list
+                        let restore_sel = if first_apply {
+                            let ai = agents
+                                .iter()
+                                .position(|a| a.name == prefs.agent)
+                                .map(|i| i as i32);
                             let merged = make_model_items(&local_snap, &cloud_names);
-                            let mi = merged.iter().position(|m| m.name == prefs.model.as_str()).map(|i| i as i32);
+                            let mi = merged
+                                .iter()
+                                .position(|m| m.name == prefs.model.as_str())
+                                .map(|i| i as i32);
                             Some((ai, mi))
                         } else {
                             None
                         };
 
-                        let agent_names: Vec<SharedString> =
-                            agent_names_str.into_iter().map(Into::into).collect();
+                        let agent_names: Vec<SharedString> = agents
+                            .iter()
+                            .map(|a| a.display.as_str().into())
+                            .collect();
                         let model_items = make_model_items(&local_snap, &cloud_names);
 
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = ui_weak.upgrade() {
                                 if agents_changed {
                                     ui.set_agents(ModelRc::new(VecModel::from(items)));
-                                    ui.set_agent_names(ModelRc::new(VecModel::from(names)));
+                                    ui.set_agent_names(ModelRc::new(VecModel::from(agent_names)));
                                 }
                                 if models_changed {
-                                // running state refreshes every cycle (cheap, no combo reset)
-                                ui.set_agents(ModelRc::new(VecModel::from(items)));
-                                if lists_changed {
-                                    ui.set_agent_names(ModelRc::new(VecModel::from(agent_names)));
                                     ui.set_models(ModelRc::new(VecModel::from(model_items)));
                                 }
-                                if let Some((ai, mi)) = restore {
+                                if let Some((ai, mi)) = restore_sel {
                                     if let Some(ai) = ai {
                                         ui.set_sel_agent_index(ai);
                                     }
