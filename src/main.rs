@@ -161,9 +161,18 @@ fn main() -> anyhow::Result<()> {
                         let msg = format!("✗ {e}");
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = ui_weak.upgrade() {
+                                let cloud: Vec<String> = (0..ui.get_models().row_count())
+                                    .filter_map(|i| {
+                                        let m = ui.get_models().row_data(i)?;
+                                        if !m.is_local { Some(m.name.to_string()) } else { None }
+                                    })
+                                    .collect();
+                                ui.set_models(ModelRc::new(VecModel::from(make_model_items(&[], &cloud))));
                                 ui.set_status(msg.into());
                                 ui.set_status_kind(2);
                             }
+                        });
+                    }
                         });
                     }
                 }
