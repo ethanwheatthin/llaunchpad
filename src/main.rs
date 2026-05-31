@@ -5,8 +5,8 @@ mod ollama;
 
 slint::include_modules!();
 
-use ollama::{list_agents, list_cloud_models, test_connection, launch_agent, running_states, Agent};
-use slint::{ModelRc, SharedString, VecModel};
+use ollama::{list_agents, list_cloud_models, list_local_models, test_connection, launch_agent, running_states, Agent};
+use slint::{Model, ModelRc, SharedString, VecModel};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -51,6 +51,21 @@ fn make_agent_items(agents: &[Agent], running: &[bool]) -> Vec<AgentItem> {
         .collect()
 }
 
+/// Merge local model names (first, teal) followed by cloud model names.
+/// Deduplicates: if a local model name also appears in cloud, the local entry wins.
+fn make_model_items(local: &[String], cloud: &[String]) -> Vec<ModelItem> {
+    let mut items: Vec<ModelItem> = local
+        .iter()
+        .map(|n| ModelItem { name: n.as_str().into(), is_local: true })
+        .collect();
+    for n in cloud {
+        if !local.iter().any(|l| l == n) {
+            items.push(ModelItem { name: n.as_str().into(), is_local: false });
+        }
+    }
+    items
+}
+
 /// Fetch agents, their running state, and the cloud model list.
 async fn fetch_all() -> anyhow::Result<(Vec<Agent>, Vec<bool>, Vec<String>)> {
     let agents = list_agents().await?;
@@ -74,26 +89,78 @@ fn main() -> anyhow::Result<()> {
     let prefs = Arc::new(config::load());
     let prefs_applied = Arc::new(AtomicBool::new(false));
 
+    // shared local models (fetched after a successful connection test)
+    let local_models: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
     // restore ollama_host from prefs
     ui.set_ollama_host(prefs.ollama_host.clone().into());
+
+    // ---- dismiss banner ----
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_dismiss(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_status("".into());
+                ui.set_status_kind(0);
+            }
+        });
+    }
 
     // ---- test connection ----
     {
         let ui_weak = ui.as_weak();
+        let local_models = local_models.clone();
         ui.on_test_connection(move |url| {
             let url = url.to_string();
             let ui_weak = ui_weak.clone();
+            let local_models = local_models.clone();
             tokio::spawn(async move {
-                let (msg, kind) = match test_connection(&url).await {
-                    Ok(info) => (format!("✓ {info}"), 1),
-                    Err(e) => (format!("✗ {e}"), 2),
-                };
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_status(msg.into());
-                        ui.set_status_kind(kind);
+                match test_connection(&url).await {
+                    Ok(info) => {
+                        // fetch local models from the confirmed-live server
+                        let fetched = list_local_models(&url).await
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|m| m.name)
+                            .collect::<Vec<_>>();
+                        let count = fetched.len();
+                        *local_models.lock().unwrap() = fetched.clone();
+
+                        let msg = if count > 0 {
+                            format!("✓ {info} · {count} local model{}", if count == 1 { "" } else { "s" })
+                        } else {
+                            format!("✓ {info} · no local models pulled")
+                        };
+
+                        // push fresh model items to the UI (local first)
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_weak.upgrade() {
+                                // read the current cloud model list from existing items
+                                let cloud: Vec<String> = (0..ui.get_models().row_count())
+                                    .filter_map(|i| {
+                                        let m = ui.get_models().row_data(i)?;
+                                        if !m.is_local { Some(m.name.to_string()) } else { None }
+                                    })
+                                    .collect();
+                                let items = make_model_items(&fetched, &cloud);
+                                ui.set_models(ModelRc::new(VecModel::from(items)));
+                                ui.set_status(msg.into());
+                                ui.set_status_kind(1);
+                            }
+                        });
                     }
-                });
+                    Err(e) => {
+                        // clear local models on connection failure
+                        *local_models.lock().unwrap() = Vec::new();
+                        let msg = format!("✗ {e}");
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_weak.upgrade() {
+                                ui.set_status(msg.into());
+                                ui.set_status_kind(2);
+                            }
+                        });
+                    }
+                }
             });
         });
     }
@@ -145,6 +212,7 @@ fn main() -> anyhow::Result<()> {
         let ui_weak = ui.as_weak();
         let prefs = prefs.clone();
         let prefs_applied = prefs_applied.clone();
+        let local_models = local_models.clone();
         let last_lists: Arc<Mutex<(Vec<String>, Vec<String>)>> =
             Arc::new(Mutex::new((Vec::new(), Vec::new())));
         Arc::new(move || {
@@ -152,6 +220,7 @@ fn main() -> anyhow::Result<()> {
             let ui_weak = ui_weak.clone();
             let prefs = prefs.clone();
             let prefs_applied = prefs_applied.clone();
+            let local_models = local_models.clone();
             let last_lists = last_lists.clone();
             tokio::spawn(async move {
                 {
@@ -163,43 +232,48 @@ fn main() -> anyhow::Result<()> {
                     });
                 }
                 match fetch_all().await {
-                    Ok((agents, running, models)) => {
+                    Ok((agents, running, cloud_names)) => {
                         *store.lock().unwrap() = agents.clone();
                         let items = make_agent_items(&agents, &running);
-                        let names_str: Vec<String> =
+                        let agent_names_str: Vec<String> =
                             agents.iter().map(|a| a.display.clone()).collect();
 
-                        // only push the combo lists when they actually change,
-                        // otherwise replacing the model resets the user's selection
+                        // only push the combo lists when they actually change to avoid
+                        // resetting the user's selection
                         let lists_changed = {
                             let mut g = last_lists.lock().unwrap();
-                            let changed = g.0 != names_str || g.1 != models;
+                            let changed = g.0 != agent_names_str || g.1 != cloud_names;
                             if changed {
-                                *g = (names_str.clone(), models.clone());
+                                *g = (agent_names_str.clone(), cloud_names.clone());
                             }
                             changed
                         };
+
+                        // snapshot local models while we hold the lock
+                        let local_snap = local_models.lock().unwrap().clone();
 
                         // restore last-used selection once, after the lists are known
                         let first_apply = !prefs_applied.swap(true, Ordering::SeqCst);
                         let restore = if first_apply {
                             let ai = agents.iter().position(|a| a.name == prefs.agent).map(|i| i as i32);
-                            let mi = models.iter().position(|m| *m == prefs.model).map(|i| i as i32);
+                            // find the saved model name in the merged list
+                            let merged = make_model_items(&local_snap, &cloud_names);
+                            let mi = merged.iter().position(|m| m.name == prefs.model.as_str()).map(|i| i as i32);
                             Some((ai, mi))
                         } else {
                             None
                         };
 
-                        let names: Vec<SharedString> =
-                            names_str.into_iter().map(Into::into).collect();
-                        let model_items: Vec<SharedString> =
-                            models.into_iter().map(Into::into).collect();
+                        let agent_names: Vec<SharedString> =
+                            agent_names_str.into_iter().map(Into::into).collect();
+                        let model_items = make_model_items(&local_snap, &cloud_names);
+
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = ui_weak.upgrade() {
                                 // running state refreshes every cycle (cheap, no combo reset)
                                 ui.set_agents(ModelRc::new(VecModel::from(items)));
                                 if lists_changed {
-                                    ui.set_agent_names(ModelRc::new(VecModel::from(names)));
+                                    ui.set_agent_names(ModelRc::new(VecModel::from(agent_names)));
                                     ui.set_models(ModelRc::new(VecModel::from(model_items)));
                                 }
                                 if let Some((ai, mi)) = restore {

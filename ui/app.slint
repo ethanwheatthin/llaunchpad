@@ -9,6 +9,11 @@ export struct AgentItem {
     color-index: int,      // slot into Theme.palette
 }
 
+export struct ModelItem {
+    name: string,          // model name passed to ollama launch
+    is-local: bool,        // true = pulled from local/remote Ollama server
+}
+
 // ---- theme ----
 global Theme {
     out property <color> bg: #1e1e2e;
@@ -19,6 +24,7 @@ global Theme {
     out property <color> subtext: #a6adc8;
     out property <color> green: #a6e3a1;
     out property <color> red: #f38ba8;
+    out property <color> local: #94e2d5;   // teal — local model indicator
     out property <[color]> palette: [
         #89b4fa, #a6e3a1, #fab387, #cba6f7, #f38ba8, #94e2d5, #f9e2af,
         #f5c2e7, #74c7ec, #f2cdcd, #b4befe, #eba0ac, #89dceb,
@@ -40,6 +46,22 @@ component AgentBadge inherits Rectangle {
         text: label;
         color: #11111b;
         font-size: 11px;
+        font-weight: 800;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// ---- small pill badge shown next to local model names ----
+component LocalBadge inherits Rectangle {
+    width: 34px;
+    height: 16px;
+    border-radius: 4px;
+    background: Theme.local.with-alpha(0.18);
+    Text {
+        text: "local";
+        color: Theme.local;
+        font-size: 9px;
         font-weight: 800;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -145,17 +167,17 @@ component AgentSelect {
     }
 }
 
-// ---- plain string dropdown, same look as AgentSelect (no badge) ----
-component StringSelect {
-    in property <[string]> items;
+// ---- model dropdown — shows a teal "local" badge for server models ----
+component ModelSelect {
+    in property <[ModelItem]> items;
     in-out property <int> current-index;
     in property <bool> enabled: true;
     min-width: 200px;
     height: 34px;
 
-    property <string> cur: (current-index >= 0 && current-index < items.length)
+    property <ModelItem> cur: (current-index >= 0 && current-index < items.length)
         ? items[current-index]
-        : "Select model";
+        : { name: "Select model", is-local: false };
 
     field := Rectangle {
         background: Theme.card;
@@ -166,9 +188,17 @@ component StringSelect {
         HorizontalLayout {
             padding-left: 12px;
             padding-right: 12px;
-            spacing: 8px;
+            spacing: 6px;
+            // teal dot shown for the selected item when it's local
+            Rectangle {
+                width: cur.is-local ? 7px : 0px;
+                height: 7px;
+                border-radius: 4px;
+                y: (parent.height - self.height) / 2;
+                background: cur.is-local ? Theme.local : transparent;
+            }
             Text {
-                text: cur;
+                text: cur.name;
                 color: Theme.text;
                 font-size: 14px;
                 vertical-alignment: center;
@@ -209,13 +239,18 @@ component StringSelect {
                         HorizontalLayout {
                             padding-left: 12px;
                             padding-right: 8px;
+                            spacing: 8px;
                             alignment: start;
                             Text {
-                                text: it;
-                                color: Theme.text;
+                                text: it.name;
+                                color: it.is-local ? Theme.local : Theme.text;
                                 font-size: 14px;
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
+                            }
+                            // "local" pill badge — only visible for local models
+                            if it.is-local: LocalBadge {
+                                y: (parent.height - self.height) / 2;
                             }
                         }
                         row-ta := TouchArea {
@@ -254,6 +289,63 @@ component ThemedInput {
                 vertical-alignment: center;
                 single-line: true;
                 accepted => { root.accepted(self.text); }
+            }
+        }
+    }
+}
+
+// ---- dismissible banner (success / error) ----
+component Banner {
+    in property <string> message;
+    in property <int> kind;   // 1 = ok (green), 2 = error (red)
+    callback close();
+
+    property <color> fg: kind == 2 ? Theme.red : Theme.green;
+    property <color> bg: kind == 2 ? Theme.red.with-alpha(0.12) : Theme.green.with-alpha(0.12);
+
+    height: 34px;
+    horizontal-stretch: 1;
+
+    animate opacity { duration: 120ms; }
+
+    Rectangle {
+        border-radius: 8px;
+        background: root.bg;
+        border-width: 1px;
+        border-color: root.fg.with-alpha(0.25);
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 4px;
+            spacing: 6px;
+            Text {
+                text: root.message;
+                color: root.fg;
+                font-size: 13px;
+                font-weight: 600;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+            // close button
+            close-btn := Rectangle {
+                width: 24px;
+                height: 24px;
+                border-radius: 6px;
+                y: (parent.height - self.height) / 2;
+                background: close-ta.has-hover
+                    ? root.fg.with-alpha(0.18)
+                    : transparent;
+                Text {
+                    text: "✕";
+                    color: root.fg;
+                    font-size: 11px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                close-ta := TouchArea {
+                    clicked => { root.close(); }
+                }
             }
         }
     }
@@ -304,7 +396,7 @@ export component AppWindow inherits Window {
 
     in property <[AgentItem]> agents;
     in property <[string]> agent-names;
-    in property <[string]> models;
+    in property <[ModelItem]> models;
     in property <string> status;
     in property <int> status-kind;   // 0 none, 1 ok, 2 error
     in property <bool> refreshing;
@@ -320,11 +412,12 @@ export component AppWindow inherits Window {
     property <int> agent-idx: sel-agent-index;
     property <string> agent-token: (sel-agent-index >= 0 && sel-agent-index < agents.length) ? agents[sel-agent-index].name : "";
     property <bool> agent-running: (sel-agent-index >= 0 && sel-agent-index < agents.length) ? agents[sel-agent-index].running : false;
-    property <string> model-val: (sel-model-index >= 0 && sel-model-index < models.length) ? models[sel-model-index] : "";
+    property <string> model-val: (sel-model-index >= 0 && sel-model-index < models.length) ? models[sel-model-index].name : "";
 
     callback launch(int /*agent index*/, string /*model*/);
     callback refresh();
     callback test-connection(string /*ollama host url*/);
+    callback dismiss();
 
     VerticalBox {
         padding: 22px;
@@ -371,7 +464,7 @@ export component AppWindow inherits Window {
             spacing: 8px;
             alignment: start;
             Text {
-                text: "Ollama host";
+                text: "Ollama Base URL";
                 color: Theme.subtext;
                 font-size: 12px;
                 font-weight: 700;
@@ -427,7 +520,7 @@ export component AppWindow inherits Window {
                         font-family: "Menlo";
                         vertical-alignment: center;
                     }
-                    model-select := StringSelect {
+                    model-select := ModelSelect {
                         items: root.models;
                         current-index <=> root.sel-model-index;
                         enabled: root.models.length > 0;
@@ -458,29 +551,17 @@ export component AppWindow inherits Window {
         // push the footer to the bottom
         Rectangle { vertical-stretch: 1; }
 
-        // ---- footer: status bar (left, stretches) + version (right) ----
+        // ---- footer: banner (left, stretches) + version (right) ----
         HorizontalLayout {
             spacing: 12px;
-            Rectangle {
+            if root.status != "": Banner {
+                message: root.status;
+                kind: root.status-kind;
+                close => { root.dismiss(); }
+            }
+            if root.status == "": Rectangle {
                 horizontal-stretch: 1;
                 height: 34px;
-                border-radius: 8px;
-                background: root.status == ""
-                    ? transparent
-                    : (root.status-kind == 2 ? Theme.red.with-alpha(0.14) : Theme.green.with-alpha(0.14));
-                HorizontalLayout {
-                    padding-left: root.status == "" ? 0px : 12px;
-                    padding-right: 12px;
-                    Text {
-                        text: root.status;
-                        color: root.status-kind == 2 ? Theme.red : Theme.green;
-                        font-size: 13px;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
-                        overflow: elide;
-                    }
-                }
             }
             Text {
                 text: "v" + root.version;
