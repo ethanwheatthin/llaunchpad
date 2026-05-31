@@ -5,6 +5,7 @@ export struct AgentItem {
     display: string,       // label (e.g. "Codex App")
     is-gui: bool,
     running: bool,
+    restorable: bool,      // has an ollama restore backup
     initials: string,      // badge text (e.g. "CA")
     color-index: int,      // slot into Theme.palette
 }
@@ -52,6 +53,8 @@ component AgentSelect {
     in-out property <int> current-index;
     min-width: 200px;
     height: 34px;
+    property <length> vis: min(items.length * 36px, 200px);
+    property <int> open-tick: 0;
 
     property <AgentItem> cur: (current-index >= 0 && current-index < items.length)
         ? items[current-index]
@@ -87,15 +90,19 @@ component AgentSelect {
             }
         }
         ta := TouchArea {
-            clicked => { popup.show(); }
+            clicked => {
+                root.open-tick += 1;
+                popup.show();
+            }
         }
     }
 
     popup := PopupWindow {
         x: 0;
-        y: root.height + 4px;
+        // expand downward from the field, with the selected row at the head
+        y: 0px;
         width: root.width;
-        height: min(items.length * 36px, 300px) + 12px;
+        height: vis + 12px;
         close-policy: close-on-click-outside;
         Rectangle {
             background: Theme.panel;
@@ -103,12 +110,16 @@ component AgentSelect {
             border-width: 1px;
             border-color: #45475a;
             ScrollView {
+                height: vis;
+                viewport-y: (root.open-tick * 0px) - max(0px, min(root.current-index * 36px, items.length * 36px + 12px - vis));
                 VerticalLayout {
                     padding: 6px;
                     for it[idx] in items: Rectangle {
                         height: 36px;
                         border-radius: 7px;
-                        background: row-ta.has-hover ? Theme.card : transparent;
+                        background: idx == root.current-index
+                            ? Theme.accent.with-alpha(0.22)
+                            : (row-ta.has-hover ? Theme.card : transparent);
                         HorizontalLayout {
                             padding-left: 8px;
                             padding-right: 8px;
@@ -152,6 +163,8 @@ component StringSelect {
     in property <bool> enabled: true;
     min-width: 200px;
     height: 34px;
+    property <length> vis: min(items.length * 36px, 200px);
+    property <int> open-tick: 0;
 
     property <string> cur: (current-index >= 0 && current-index < items.length)
         ? items[current-index]
@@ -184,15 +197,19 @@ component StringSelect {
         }
         ta := TouchArea {
             enabled: root.enabled;
-            clicked => { popup.show(); }
+            clicked => {
+                root.open-tick += 1;
+                popup.show();
+            }
         }
     }
 
     popup := PopupWindow {
         x: 0;
-        y: root.height + 4px;
+        // expand downward from the field, with the selected row at the head
+        y: 0px;
         width: root.width;
-        height: min(items.length * 36px, 300px) + 12px;
+        height: vis + 12px;
         close-policy: close-on-click-outside;
         Rectangle {
             background: Theme.panel;
@@ -200,12 +217,16 @@ component StringSelect {
             border-width: 1px;
             border-color: #45475a;
             ScrollView {
+                height: vis;
+                viewport-y: (root.open-tick * 0px) - max(0px, min(root.current-index * 36px, items.length * 36px + 12px - vis));
                 VerticalLayout {
                     padding: 6px;
                     for it[idx] in items: Rectangle {
                         height: 36px;
                         border-radius: 7px;
-                        background: row-ta.has-hover ? Theme.card : transparent;
+                        background: idx == root.current-index
+                            ? Theme.accent.with-alpha(0.22)
+                            : (row-ta.has-hover ? Theme.card : transparent);
                         HorizontalLayout {
                             padding-left: 12px;
                             padding-right: 8px;
@@ -290,9 +311,11 @@ export component AppWindow inherits Window {
     property <int> agent-idx: sel-agent-index;
     property <string> agent-token: (sel-agent-index >= 0 && sel-agent-index < agents.length) ? agents[sel-agent-index].name : "";
     property <bool> agent-running: (sel-agent-index >= 0 && sel-agent-index < agents.length) ? agents[sel-agent-index].running : false;
+    property <bool> agent-restorable: (sel-agent-index >= 0 && sel-agent-index < agents.length) ? agents[sel-agent-index].restorable : false;
     property <string> model-val: (sel-model-index >= 0 && sel-model-index < models.length) ? models[sel-model-index] : "";
 
     callback launch(int /*agent index*/, string /*model*/);
+    callback restore(int /*agent index*/);
     callback refresh();
 
     VerticalBox {
@@ -390,6 +413,12 @@ export component AppWindow inherits Window {
                 primary: true;
                 enabled: root.agent-token != "" && root.model-val != "";
                 clicked => { root.launch(root.agent-idx, root.model-val); }
+            }
+            Btn {
+                text: "Restore";
+                primary: false;
+                enabled: root.agent-restorable;
+                clicked => { root.restore(root.agent-idx); }
             }
             Text {
                 text: root.agent-running ? "● running" : "";
