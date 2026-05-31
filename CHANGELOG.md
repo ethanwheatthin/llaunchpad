@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-05-31
+
+### Fixed
+- `ollama` binary resolution now probes the user's login-shell PATH first, then common
+  locations including the `Ollama.app` bundle. Works whether Ollama was installed via
+  Homebrew, the macOS app, or any custom PATH — not just brew.
+
 ## [0.1.2] - 2026-05-31
 
 ### Fixed
@@ -42,7 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Persisted last-used agent + model across runs.
 - App icon, banner, and `bundle.sh` to assemble `Llaunchpad.app`.
 
-[Unreleased]: https://github.com/draugvar/llaunchpad/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/draugvar/llaunchpad/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/draugvar/llaunchpad/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/draugvar/llaunchpad/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/draugvar/llaunchpad/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/draugvar/llaunchpad/releases/tag/v0.1.0
