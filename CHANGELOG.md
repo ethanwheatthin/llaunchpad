@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-05-31
+
+### Added
+- GitHub Actions release pipeline: universal macOS build, `.app` packaging, GitHub Release, and Homebrew tap update — all triggered by a version bump on `main`.
+- Homebrew install: `brew install --cask draugvar/llaunchpad/llaunchpad`.
+- Optional (secret-gated) Developer ID signing + notarization step in CI.
+
+### Changed
+- `bundle.sh` now reads the version from `Cargo.toml` instead of hardcoding it.
+
 ## [0.1.0] - 2026-05-31
 
 ### Added
@@ -21,5 +31,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Persisted last-used agent + model across runs.
 - App icon, banner, and `bundle.sh` to assemble `Llaunchpad.app`.
 
-[Unreleased]: https://github.com/draugvar/llaunchpad/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/draugvar/llaunchpad/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/draugvar/llaunchpad/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/draugvar/llaunchpad/releases/tag/v0.1.0
