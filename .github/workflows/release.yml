@@ -1,0 +1,189 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  # ── Check if the version in Cargo.toml is new ──────────────────────────────
+  check-version:
+    name: Check version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      should_release: ${{ steps.check.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Detected version: $VERSION"
+
+      - name: Check if tag already exists
+        id: check
+        run: |
+          if git tag | grep -qx "v${{ steps.version.outputs.version }}"; then
+            echo "should_release=false" >> $GITHUB_OUTPUT
+            echo "Tag exists — skipping release"
+          else
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "New version — will build and release"
+          fi
+
+  # ── Build universal macOS .app ─────────────────────────────────────────────
+  build:
+    name: Build macOS (universal)
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Add cross-compilation targets
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
+      - name: Build universal binary
+        run: |
+          cargo build --release --target x86_64-apple-darwin
+          cargo build --release --target aarch64-apple-darwin
+          mkdir -p target/release
+          lipo -create -output target/release/llaunchpad \
+            target/x86_64-apple-darwin/release/llaunchpad \
+            target/aarch64-apple-darwin/release/llaunchpad
+
+      - name: Assemble Llaunchpad.app
+        run: ./bundle.sh
+
+      # ── Optional: Developer ID signing + notarization ──────────────────────
+      # Runs only when the MACOS_CERTIFICATE secret is set (Apple Developer
+      # Program required). Without it, the app still installs cleanly via
+      # Homebrew, which strips the quarantine attribute.
+      - name: Sign & notarize (optional)
+        if: ${{ env.MACOS_CERTIFICATE != '' }}
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          echo "$MACOS_CERTIFICATE" | base64 --decode > cert.p12
+          security create-keychain -p actions build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p actions build.keychain
+          security import cert.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k actions build.keychain
+          codesign --force --deep --options runtime --timestamp \
+            --sign "$MACOS_SIGN_IDENTITY" Llaunchpad.app
+          ditto -c -k --keepParent Llaunchpad.app notarize.zip
+          xcrun notarytool submit notarize.zip \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple Llaunchpad.app
+
+      - name: Package tarball
+        run: tar czf llaunchpad-macos-universal.tar.gz Llaunchpad.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: llaunchpad-macos-universal.tar.gz
+          path: llaunchpad-macos-universal.tar.gz
+          retention-days: 1
+
+  # ── Create GitHub Release ──────────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    needs: [check-version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "v${{ needs.check-version.outputs.version }}"
+          git push origin "v${{ needs.check-version.outputs.version }}"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.check-version.outputs.version }}
+          generate_release_notes: true
+          files: llaunchpad-macos-universal.tar.gz
+
+  # ── Update Homebrew tap ────────────────────────────────────────────────────
+  update-tap:
+    name: Update Homebrew tap
+    needs: [check-version, release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "v${{ needs.check-version.outputs.version }}" \
+            --repo draugvar/llaunchpad \
+            --pattern "llaunchpad-macos-universal.tar.gz"
+
+      - name: Compute SHA256
+        id: sha256
+        run: echo "value=$(shasum -a 256 llaunchpad-macos-universal.tar.gz | awk '{print $1}')" >> $GITHUB_OUTPUT
+
+      - name: Update tap formula
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+          VERSION: ${{ needs.check-version.outputs.version }}
+          SHA256: ${{ steps.sha256.outputs.value }}
+        run: |
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/draugvar/homebrew-llaunchpad.git" tap
+          mkdir -p tap/Casks
+          {
+            echo 'cask "llaunchpad" do'
+            echo "  version \"${VERSION}\""
+            echo "  sha256 \"${SHA256}\""
+            echo ''
+            echo '  url "https://github.com/draugvar/llaunchpad/releases/download/v#{version}/llaunchpad-macos-universal.tar.gz"'
+            echo '  name "Llaunchpad"'
+            echo '  desc "Native macOS launcher for Ollama coding agents with cloud models"'
+            echo '  homepage "https://github.com/draugvar/llaunchpad"'
+            echo ''
+            echo '  app "Llaunchpad.app"'
+            echo ''
+            echo '  zap trash: ['
+            echo '    "~/Library/Application Support/Llaunchpad",'
+            echo '  ]'
+            echo 'end'
+          } > tap/Casks/llaunchpad.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/llaunchpad.rb
+          git diff --cached --quiet || git commit -m "Update llaunchpad to v${VERSION}"
+          git push
+
+  # ── Cleanup ────────────────────────────────────────────────────────────────
+  cleanup:
+    name: Delete artifacts
+    needs: [release, update-tap]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: geekyeggo/delete-artifact@v6
+        with:
+          name: llaunchpad-macos-universal.tar.gz
+          failOnError: false

@@ -53,11 +53,18 @@ the exact cloud model names, and re-typing the command every time.
 - macOS 11+
 - [Ollama](https://ollama.com/download) installed and signed in (`ollama signin`) for cloud models.
 
-### Download
-Grab the latest `Llaunchpad.app` from the [Releases](https://github.com/draugvar/llaunchpad/releases) page,
-move it to `/Applications`, and open it.
+### Homebrew (recommended)
+```bash
+brew install --cask draugvar/llaunchpad/llaunchpad
+```
+Homebrew strips the quarantine flag, so the app opens normally — no right-click dance.
 
-> First launch: right-click → **Open** (unsigned build), then confirm.
+### Download
+Or grab `llaunchpad-macos-universal.tar.gz` from the [Releases](https://github.com/draugvar/llaunchpad/releases)
+page, unzip, move `Llaunchpad.app` to `/Applications`.
+
+> The build is not notarized (no Apple Developer Program). On a direct download,
+> first launch needs right-click → **Open**. Installing via Homebrew avoids this.
 
 ### Build from source
 ```bash
