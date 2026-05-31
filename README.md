@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/draugvar/llaunchpad/stargazers"><img src="https://img.shields.io/github/stars/draugvar/llaunchpad?style=for-the-badge&logo=github&color=89b4fa&labelColor=181825" alt="Stars"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-cba6f7?style=for-the-badge&labelColor=181825" alt="License"></a>
-  <img src="https://img.shields.io/badge/platform-macOS-a6e3a1?style=for-the-badge&logo=apple&labelColor=181825" alt="Platform">
+  <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-a6e3a1?style=for-the-badge&labelColor=181825" alt="Platform">
   <img src="https://img.shields.io/badge/made%20with-Rust%20%2B%20Slint-fab387?style=for-the-badge&logo=rust&labelColor=181825" alt="Rust + Slint">
 </p>
 
@@ -50,21 +50,24 @@ the exact cloud model names, and re-typing the command every time.
 ## Install
 
 ### Prerequisites
-- macOS 11+
+- macOS 11+, Linux, or Windows
 - [Ollama](https://ollama.com/download) installed and signed in (`ollama signin`) for cloud models.
 
-### Homebrew (recommended)
+### Homebrew (macOS, recommended)
 ```bash
 brew install --cask draugvar/llaunchpad/llaunchpad
 ```
 Homebrew strips the quarantine flag, so the app opens normally — no right-click dance.
 
-### Download
-Or grab `llaunchpad-macos-universal.tar.gz` from the [Releases](https://github.com/draugvar/llaunchpad/releases)
-page, unzip, move `Llaunchpad.app` to `/Applications`.
+### Download (all platforms)
+From the [Releases](https://github.com/draugvar/llaunchpad/releases) page:
 
-> The build is not notarized (no Apple Developer Program). On a direct download,
-> first launch needs right-click → **Open**. Installing via Homebrew avoids this.
+- **macOS** — `llaunchpad-macos-universal.tar.gz` → unzip → move `Llaunchpad.app` to `/Applications`.
+  (Direct download isn't notarized; first launch needs right-click → **Open**. Homebrew avoids this.)
+- **Linux** — `llaunchpad-linux-x86_64.tar.gz` → extract → run `./llaunchpad`.
+- **Windows** — `llaunchpad-windows-x86_64.zip` → extract → run `llaunchpad.exe`.
+
+Ollama must be installed and on your PATH (or in a standard location) on every platform.
 
 ### Build from source
 ```bash

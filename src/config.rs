@@ -11,11 +11,22 @@ pub struct Prefs {
 }
 
 fn prefs_path() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(
-        PathBuf::from(home)
-            .join("Library/Application Support/Llaunchpad/prefs.json"),
-    )
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").ok()?;
+        Some(PathBuf::from(home).join("Library/Application Support/Llaunchpad/prefs.json"))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let base = std::env::var("APPDATA").ok()?;
+        Some(PathBuf::from(base).join("Llaunchpad").join("prefs.json"))
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let base = std::env::var("XDG_CONFIG_HOME")
+            .unwrap_or_else(|_| format!("{}/.config", std::env::var("HOME").unwrap_or_default()));
+        Some(PathBuf::from(base).join("llaunchpad").join("prefs.json"))
+    }
 }
 
 pub fn load() -> Prefs {

@@ -69,6 +69,7 @@ fn main() -> anyhow::Result<()> {
     let _guard = rt.enter();
 
     let ui = AppWindow::new()?;
+    ui.set_version(env!("CARGO_PKG_VERSION").into());
     let agents_store: Arc<Mutex<Vec<Agent>>> = Arc::new(Mutex::new(Vec::new()));
     let prefs = Arc::new(config::load());
     let prefs_applied = Arc::new(AtomicBool::new(false));

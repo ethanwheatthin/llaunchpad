@@ -1,22 +1,35 @@
 use crate::ollama::Agent;
 use anyhow::{Context, Result};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::process::Command;
-use sysinfo::System;
 
-/// For GUI agents: (macOS application name used to quit, `.app` bundle dir name).
-fn gui_app(agent: &str) -> Option<(&'static str, &'static str)> {
-    match agent {
-        "codex-app" => Some(("Codex", "Codex.app")),
-        "vscode" => Some(("Visual Studio Code", "Visual Studio Code.app")),
-        _ => None,
-    }
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
 }
 
+fn codex_home() -> Option<PathBuf> {
+    home_dir().map(|h| h.join(".codex"))
+}
+
+// ───────────────────────── running detection ─────────────────────────
+
 /// Running state for many agents in one process-table scan.
-/// Detects the GUI app by its main executable path (`<bundle>/Contents/MacOS/`),
-/// so it does not false-positive on the `codex` CLI / app-server binary
-/// (which lives under `Contents/Resources`). CLI agents are always `false`.
+/// On macOS the GUI app is matched by its bundle executable path
+/// (`<bundle>/Contents/MacOS/`) so it does not false-positive on the
+/// `codex` CLI/app-server binary under `Contents/Resources`.
+#[cfg(target_os = "macos")]
 pub fn running_states(agents: &[Agent]) -> Vec<bool> {
+    use sysinfo::System;
+    fn bundle(agent: &str) -> Option<&'static str> {
+        match agent {
+            "codex-app" => Some("Codex.app"),
+            "vscode" => Some("Visual Studio Code.app"),
+            _ => None,
+        }
+    }
     let mut sys = System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
     let exe_paths: Vec<String> = sys
@@ -26,9 +39,9 @@ pub fn running_states(agents: &[Agent]) -> Vec<bool> {
         .collect();
     agents
         .iter()
-        .map(|a| match gui_app(&a.name) {
-            Some((_, bundle)) => {
-                let needle = format!("{bundle}/Contents/MacOS/");
+        .map(|a| match bundle(&a.name) {
+            Some(b) => {
+                let needle = format!("{b}/Contents/MacOS/");
                 exe_paths.iter().any(|p| p.contains(&needle))
             }
             None => false,
@@ -36,7 +49,12 @@ pub fn running_states(agents: &[Agent]) -> Vec<bool> {
         .collect()
 }
 
-/// Best-effort: is the agent's app currently running?
+/// Running detection is macOS-only for now; elsewhere report not-running.
+#[cfg(not(target_os = "macos"))]
+pub fn running_states(agents: &[Agent]) -> Vec<bool> {
+    agents.iter().map(|_| false).collect()
+}
+
 pub fn agent_running(agent: &Agent) -> bool {
     running_states(std::slice::from_ref(agent))
         .first()
@@ -44,77 +62,250 @@ pub fn agent_running(agent: &Agent) -> bool {
         .unwrap_or(false)
 }
 
-/// Quit a GUI app gracefully (AppleScript), with a killall fallback.
-fn quit_gui(app_name: &str) {
-    let _ = Command::new("osascript")
-        .arg("-e")
-        .arg(format!("tell application \"{}\" to quit", app_name))
-        .status();
-    // give it a moment, then force any stragglers (executable name == app name)
-    std::thread::sleep(std::time::Duration::from_millis(1200));
-    let _ = Command::new("killall").arg(app_name).status();
+// ───────────────────────── platform helpers ─────────────────────────
+
+/// Run a shell command line in a new terminal window.
+fn spawn_in_terminal(cmd: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "tell application \"Terminal\"\nactivate\ndo script \"{}\"\nend tell",
+            cmd.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+        Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .spawn()
+            .context("failed to open Terminal")?;
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let hold = format!("{cmd}; exec ${{SHELL:-/bin/bash}}");
+        let candidates: &[(&str, &[&str])] = &[
+            ("x-terminal-emulator", &["-e", "bash", "-lc"]),
+            ("gnome-terminal", &["--", "bash", "-lc"]),
+            ("konsole", &["-e", "bash", "-lc"]),
+            ("xfce4-terminal", &["-e", "bash", "-lc"]),
+            ("xterm", &["-e", "bash", "-lc"]),
+        ];
+        for (bin, args) in candidates {
+            let mut c = Command::new(bin);
+            c.args(*args).arg(&hold);
+            if c.spawn().is_ok() {
+                return Ok(());
+            }
+        }
+        anyhow::bail!("no terminal emulator found (tried gnome-terminal, konsole, xterm…)");
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", "cmd", "/K", cmd])
+            .spawn()
+            .context("failed to open cmd")?;
+        return Ok(());
+    }
 }
 
-/// Remove the legacy top-level `profile = "..."` line that `ollama launch
-/// codex-app` writes — current Codex rejects it. The top-level model/provider
-/// keys it also writes are enough.
-fn sanitize_codex_config() -> Result<()> {
-    let home = std::env::var("HOME").context("HOME not set")?;
-    let path = std::path::Path::new(&home).join(".codex/config.toml");
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return Ok(()); // nothing to clean
-    };
-    let cleaned: String = content
-        .lines()
-        .filter(|l| !l.trim_start().starts_with("profile ="))
-        .collect::<Vec<_>>()
-        .join("\n");
-    if cleaned.len() != content.trim_end().len() {
-        std::fs::write(&path, format!("{cleaned}\n")).context("failed to rewrite codex config")?;
+/// Quit a running GUI app (best effort, per platform).
+fn quit_gui(app_name: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("osascript")
+            .arg("-e")
+            .arg(format!("tell application \"{app_name}\" to quit"))
+            .status();
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        let _ = Command::new("killall").arg(app_name).status();
     }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = Command::new("pkill").args(["-f", app_name]).status();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/IM", &format!("{app_name}.exe"), "/F"])
+            .status();
+    }
+}
+
+/// Open a GUI app by macOS application name (no-op shape elsewhere).
+#[cfg(target_os = "macos")]
+fn open_macos_app(app_name: &str) -> Result<()> {
+    Command::new("open")
+        .args(["-a", app_name])
+        .spawn()
+        .with_context(|| format!("failed to open {app_name}"))?;
     Ok(())
 }
 
-/// Codex App: configure via `--config` (no auto-launch), strip the legacy
-/// `profile =` line, then open the app ourselves. Avoids the
-/// "legacy profile config no longer supported" error.
-fn launch_codex_app(model: &str) -> Result<()> {
-    if let Some((app_name, _)) = gui_app("codex-app") {
-        // best-effort quit if already open (reuses bundle-path detection)
-        let probe = Agent {
-            name: "codex-app".to_string(),
-            display: String::new(),
-            is_gui: true,
-        };
-        if agent_running(&probe) {
-            quit_gui(app_name);
+// ───────────────────────── codex profile migration ─────────────────────────
+
+/// Read a `key = value` (string) from a section body.
+fn read_val(body: &[String], key: &str) -> Option<String> {
+    for l in body {
+        let l = l.trim();
+        if let Some(rest) = l.strip_prefix(key) {
+            if let Some(v) = rest.trim_start().strip_prefix('=') {
+                return Some(v.trim().trim_matches('"').to_string());
+            }
         }
     }
-    // configure only (writes config, does not launch)
-    Command::new(crate::ollama::ollama_bin())
-        .args(["launch", "codex-app", "--model", model, "--config", "-y"])
-        .status()
-        .context("failed to configure codex-app")?;
-    sanitize_codex_config()?;
-    Command::new("open")
-        .args(["-a", "Codex"])
-        .spawn()
-        .context("failed to open Codex")?;
+    None
+}
+
+/// Current Codex rejects legacy `profile = "..."` selectors and `[profiles.X]`
+/// tables in `config.toml`; profiles must live in `<X>.config.toml`.
+/// `ollama launch` (0.24) still writes the legacy form, so we migrate after it:
+/// move each `[profiles.X]` table (plus its provider block and the chosen model)
+/// into `~/.codex/X.config.toml`, then strip the table and selector from config.toml.
+fn migrate_codex_profiles(model: &str) -> Result<()> {
+    let Some(home) = codex_home() else { return Ok(()) };
+    let cfg = home.join("config.toml");
+    let Ok(content) = std::fs::read_to_string(&cfg) else { return Ok(()) };
+
+    // split into ordered sections ("" = preamble before first table)
+    let mut order: Vec<String> = vec![String::new()];
+    let mut sections: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    sections.insert(String::new(), Vec::new());
+    let mut cur = String::new();
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with('[') && t.ends_with(']') && !t.starts_with("[[") {
+            cur = t[1..t.len() - 1].to_string();
+            if !sections.contains_key(&cur) {
+                order.push(cur.clone());
+                sections.insert(cur.clone(), Vec::new());
+            }
+        } else {
+            sections.get_mut(&cur).unwrap().push(line.to_string());
+        }
+    }
+
+    let profiles: Vec<String> = order
+        .iter()
+        .filter(|h| h.starts_with("profiles."))
+        .cloned()
+        .collect();
+
+    // write each profile into its own <name>.config.toml
+    for ph in &profiles {
+        let name = ph.trim_start_matches("profiles.").to_string();
+        let body = sections.get(ph).cloned().unwrap_or_default();
+        let mut out = String::new();
+        if read_val(&body, "model").is_none() {
+            out.push_str(&format!("model = \"{model}\"\n"));
+        }
+        for l in &body {
+            if !l.trim().is_empty() {
+                out.push_str(l);
+                out.push('\n');
+            }
+        }
+        if let Some(prov) = read_val(&body, "model_provider") {
+            let prov_header = format!("model_providers.{prov}");
+            if let Some(pbody) = sections.get(&prov_header) {
+                out.push_str(&format!("\n[model_providers.{prov}]\n"));
+                for l in pbody {
+                    if !l.trim().is_empty() {
+                        out.push_str(l);
+                        out.push('\n');
+                    }
+                }
+            }
+        }
+        let _ = std::fs::write(home.join(format!("{name}.config.toml")), out);
+    }
+
+    if profiles.is_empty() {
+        // still drop a stray `profile =` selector if present
+        if !content.lines().any(|l| l.trim_start().starts_with("profile =")) {
+            return Ok(());
+        }
+    }
+
+    // rebuild config.toml without profile tables and without `profile =` selector
+    let mut rebuilt = String::new();
+    for h in &order {
+        if h.starts_with("profiles.") {
+            continue;
+        }
+        let body = &sections[h];
+        if h.is_empty() {
+            for l in body {
+                if l.trim_start().starts_with("profile =") {
+                    continue;
+                }
+                rebuilt.push_str(l);
+                rebuilt.push('\n');
+            }
+        } else {
+            rebuilt.push_str(&format!("[{h}]\n"));
+            for l in body {
+                rebuilt.push_str(l);
+                rebuilt.push('\n');
+            }
+        }
+    }
+    std::fs::write(&cfg, rebuilt).context("failed to rewrite codex config.toml")?;
     Ok(())
 }
 
-/// Launch (or relaunch) an agent with the given model via `ollama launch`.
-/// If the agent is already running it is closed first, then relaunched.
-pub fn launch_agent(agent: &Agent, model: &str) -> Result<()> {
-    if agent.name == "codex-app" {
-        return launch_codex_app(model);
+/// Codex (GUI app or CLI): `ollama launch` writes a legacy profile config that
+/// current Codex rejects. Configure first (`--config`), migrate the profile into
+/// its own file, then launch Codex ourselves.
+fn launch_codex(agent: &str, is_gui: bool, model: &str) -> Result<()> {
+    // close the GUI app if it is already open (relaunch)
+    #[cfg(target_os = "macos")]
+    if is_gui {
+        let probe = Agent { name: agent.to_string(), display: String::new(), is_gui: true };
+        if agent_running(&probe) {
+            quit_gui("Codex");
+        }
     }
+
+    // configure only — writes the (legacy) profile; ignore its exit status
+    let _ = Command::new(crate::ollama::ollama_bin())
+        .args(["launch", agent, "--model", model, "--config", "-y"])
+        .status();
+
+    migrate_codex_profiles(model)?;
+
+    if is_gui {
+        #[cfg(target_os = "macos")]
+        {
+            open_macos_app("Codex")?;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Command::new(crate::ollama::ollama_bin())
+                .args(["launch", agent, "--model", model, "-y"])
+                .spawn()
+                .context("failed to launch codex-app")?;
+        }
+    } else {
+        // CLI: run codex against the migrated profile in a terminal
+        spawn_in_terminal("codex --profile ollama-launch")?;
+    }
+    Ok(())
+}
+
+// ───────────────────────── public entry point ─────────────────────────
+
+/// Launch (or relaunch) an agent with the given model via `ollama launch`.
+pub fn launch_agent(agent: &Agent, model: &str) -> Result<()> {
+    match agent.name.as_str() {
+        "codex-app" => return launch_codex("codex-app", true, model),
+        "codex" => return launch_codex("codex", false, model),
+        _ => {}
+    }
+
     if agent.is_gui {
-        if let Some((app_name, _)) = gui_app(&agent.name) {
-            // close if already open, then relaunch
-            if agent_running(agent) {
-                quit_gui(app_name);
-            }
+        #[cfg(target_os = "macos")]
+        if agent.name == "vscode" && agent_running(agent) {
+            quit_gui("Visual Studio Code");
         }
         // ollama launch configures the integration and opens the app
         Command::new(crate::ollama::ollama_bin())
@@ -122,25 +313,14 @@ pub fn launch_agent(agent: &Agent, model: &str) -> Result<()> {
             .spawn()
             .with_context(|| format!("failed to launch `{}`", agent.name))?;
     } else {
-        // CLI agent: run inside Terminal.app (absolute path: GUI PATH is minimal)
+        // CLI agent: run inside a terminal (absolute path: GUI PATH is minimal)
         let cmd = format!(
             "{} launch {} --model {} -y",
             crate::ollama::ollama_bin(),
             agent.name,
             model
         );
-        let script = format!(
-            "tell application \"Terminal\"\n\
-             activate\n\
-             do script \"{}\"\n\
-             end tell",
-            cmd.replace('\\', "\\\\").replace('"', "\\\"")
-        );
-        Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .spawn()
-            .with_context(|| format!("failed to open Terminal for `{}`", agent.name))?;
+        spawn_in_terminal(&cmd)?;
     }
     Ok(())
 }

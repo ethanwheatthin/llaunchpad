@@ -6,6 +6,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-31
+
+### Added
+- **Cross-platform**: builds and runs on macOS, Linux, and Windows. CI now produces a
+  release artifact for each (`*-macos-universal.tar.gz`, `*-linux-x86_64.tar.gz`,
+  `*-windows-x86_64.zip`).
+- App version shown in the bottom-right of the window.
+
+### Fixed
+- **Codex CLI/App**: `ollama launch` (0.24) writes a legacy `[profiles.…]` table that current
+  Codex rejects. Llaunchpad now migrates the profile into its own `~/.codex/<name>.config.toml`
+  and strips the legacy table/selector from `config.toml`, then launches Codex.
+
+### Changed
+- Platform-specific launch paths: terminal spawning, GUI quit/relaunch, prefs location, and
+  `ollama` binary resolution are now adapted per OS.
+
 ## [0.1.3] - 2026-05-31
 
 ### Fixed
@@ -49,7 +66,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Persisted last-used agent + model across runs.
 - App icon, banner, and `bundle.sh` to assemble `Llaunchpad.app`.
 
-[Unreleased]: https://github.com/draugvar/llaunchpad/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/draugvar/llaunchpad/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/draugvar/llaunchpad/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/draugvar/llaunchpad/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/draugvar/llaunchpad/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/draugvar/llaunchpad/compare/v0.1.0...v0.1.1

@@ -280,6 +280,7 @@ export component AppWindow inherits Window {
     in property <string> status;
     in property <int> status-kind;   // 0 none, 1 ok, 2 error
     in property <bool> refreshing;
+    in property <string> version;
 
     // selection indices (settable from Rust to restore last use)
     in-out property <int> sel-agent-index: -1;
@@ -398,23 +399,38 @@ export component AppWindow inherits Window {
             }
         }
 
-        // ---- status bar ----
-        if root.status != "": Rectangle {
-            height: 34px;
-            border-radius: 8px;
-            background: root.status-kind == 2 ? Theme.red.with-alpha(0.14) : Theme.green.with-alpha(0.14);
-            HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 12px;
-                Text {
-                    text: root.status;
-                    color: root.status-kind == 2 ? Theme.red : Theme.green;
-                    font-size: 13px;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                    overflow: elide;
+        // push the footer to the bottom
+        Rectangle { vertical-stretch: 1; }
+
+        // ---- footer: status bar (left, stretches) + version (right) ----
+        HorizontalLayout {
+            spacing: 12px;
+            Rectangle {
+                horizontal-stretch: 1;
+                height: 34px;
+                border-radius: 8px;
+                background: root.status == ""
+                    ? transparent
+                    : (root.status-kind == 2 ? Theme.red.with-alpha(0.14) : Theme.green.with-alpha(0.14));
+                HorizontalLayout {
+                    padding-left: root.status == "" ? 0px : 12px;
+                    padding-right: 12px;
+                    Text {
+                        text: root.status;
+                        color: root.status-kind == 2 ? Theme.red : Theme.green;
+                        font-size: 13px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
                 }
+            }
+            Text {
+                text: "v" + root.version;
+                color: Theme.subtext;
+                font-size: 11px;
+                vertical-alignment: center;
             }
         }
     }
