@@ -6,6 +6,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-01
+
+### Added
+- **"Not installed" detection** — agents whose required app or CLI is missing on
+  the machine show a peach **not installed** badge in the dropdown, with the
+  badge/text dimmed. The Launch button is disabled and a `● not installed`
+  hint is shown next to it. The launch path runs a pre-flight check that
+  fails with a clear `<Agent> is not installed` error instead of returning a
+  false ✓. Detection is rule-based for known agents (Codex App, VS Code,
+  Cursor, Codex, Claude Code, opencode); unknown integrations are
+  conservatively reported as installed so an unrecognised agent is never
+  blocked.
+- Install state is refreshed alongside running state on every poll (5s) and
+  is included in the change-detection signature, so the badge updates the
+  moment the missing app appears in `/Applications` or the binary lands in
+  PATH.
+
+### Changed
+- Agent dropdown popup auto-expands beyond the field width (min 320px) so the
+  `not installed` badge fits alongside long agent names without overflowing
+  the panel. The name `Text` now elides with `…` when space is tight; the
+  popup container and each row clip overflow at their rounded border.
+
+### Internal
+- Install detection is split into pure helpers (`check_install_spec`,
+  `binary_in`, `bundle_in`) with 11 new unit tests covering the rule table,
+  OR semantics, missing/empty specs, multi-directory lookup, the batch
+  invariant, and the Windows `.exe` / `.cmd` / `.bat` extension fallback.
+
 ## [0.4.0] - 2026-06-01
 
 ### Added
@@ -115,7 +144,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Persisted last-used agent + model across runs.
 - App icon, banner, and `bundle.sh` to assemble `Llaunchpad.app`.
 
-[Unreleased]: https://github.com/draugvar/llaunchpad/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/draugvar/llaunchpad/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/draugvar/llaunchpad/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/draugvar/llaunchpad/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/draugvar/llaunchpad/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/draugvar/llaunchpad/compare/v0.2.0...v0.2.1

@@ -136,10 +136,15 @@ fn bundle_search_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// True if a binary `name` is found in any login-PATH directory.
+#[cfg(not(target_os = "macos"))]
+fn bundle_search_dirs() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+/// True if a binary `name` is found in any of `dirs`.
 /// On Windows, common executable extensions are appended.
-fn binary_exists(name: &str) -> bool {
-    for d in login_path_dirs() {
+fn binary_in(name: &str, dirs: &[PathBuf]) -> bool {
+    for d in dirs {
         if d.join(name).exists() {
             return true;
         }
@@ -153,23 +158,25 @@ fn binary_exists(name: &str) -> bool {
     false
 }
 
-/// True if a `.app` bundle with `name` exists in a standard macOS location.
-#[cfg(target_os = "macos")]
-fn bundle_exists(name: &str) -> bool {
-    bundle_search_dirs().iter().any(|d| d.join(name).exists())
+/// True if a `.app` bundle named `name` exists in any of `dirs`.
+fn bundle_in(name: &str, dirs: &[PathBuf]) -> bool {
+    dirs.iter().any(|d| d.join(name).exists())
 }
 
-#[cfg(not(target_os = "macos"))]
-fn bundle_exists(_name: &str) -> bool {
-    false
+/// Pure check: spec is satisfied if any candidate binary is found in
+/// `path_dirs` or any candidate bundle is found in `bundle_dirs`.
+/// Spec with empty `bins` and `bundles` always returns false (no positive
+/// evidence possible).
+fn check_install_spec(spec: &InstallSpec, path_dirs: &[PathBuf], bundle_dirs: &[PathBuf]) -> bool {
+    spec.bins.iter().any(|b| binary_in(b, path_dirs))
+        || spec.bundles.iter().any(|b| bundle_in(b, bundle_dirs))
 }
 
 /// Whether the agent's required app or CLI is installed on this machine.
 /// Agents without a rule are conservatively reported as installed.
 pub fn agent_installed(name: &str) -> bool {
     let Some(spec) = install_spec(name) else { return true };
-    spec.bins.iter().any(|b| binary_exists(b))
-        || spec.bundles.iter().any(|b| bundle_exists(b))
+    check_install_spec(&spec, login_path_dirs(), &bundle_search_dirs())
 }
 
 /// Batched install states (mirrors `running_states`).
@@ -512,6 +519,36 @@ pub fn launch_agent(agent: &Agent, model: &str, ollama_host: Option<&str>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Unique per-test tempdir under the OS temp root, auto-cleaned on Drop.
+    /// We avoid pulling in `tempfile` as a dev-dep — the project has no
+    /// dev-dependencies and this keeps it that way.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            static SEQ: AtomicU64 = AtomicU64::new(0);
+            let n = SEQ.fetch_add(1, Ordering::Relaxed);
+            let p = std::env::temp_dir().join(format!(
+                "llaunchpad-test-{}-{}-{n}",
+                tag,
+                std::process::id()
+            ));
+            fs::create_dir_all(&p).expect("create tempdir");
+            Self(p)
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn unknown_agent_is_assumed_installed() {
@@ -524,6 +561,169 @@ mod tests {
     fn known_agents_have_install_specs() {
         for name in ["codex-app", "codex", "vscode", "cursor", "claude", "opencode"] {
             assert!(install_spec(name).is_some(), "missing spec for `{name}`");
+        }
+    }
+
+    #[test]
+    fn install_spec_table_contents() {
+        // The table content is the contract with the rest of the app.
+        // A typo here silently makes a launch fail in the field — pin it.
+        let codex_app = install_spec("codex-app").unwrap();
+        assert_eq!(codex_app.bins, &[] as &[&str]);
+        assert_eq!(codex_app.bundles, &["Codex.app"]);
+
+        let vscode = install_spec("vscode").unwrap();
+        assert_eq!(vscode.bins, &["code"]);
+        assert_eq!(vscode.bundles, &["Visual Studio Code.app", "VSCodium.app"]);
+
+        let cursor = install_spec("cursor").unwrap();
+        assert_eq!(cursor.bins, &["cursor"]);
+        assert_eq!(cursor.bundles, &["Cursor.app"]);
+
+        let codex = install_spec("codex").unwrap();
+        assert_eq!(codex.bins, &["codex"]);
+        assert_eq!(codex.bundles, &[] as &[&str]);
+
+        let claude = install_spec("claude").unwrap();
+        assert_eq!(claude.bins, &["claude"]);
+        assert_eq!(claude.bundles, &[] as &[&str]);
+
+        let opencode = install_spec("opencode").unwrap();
+        assert_eq!(opencode.bins, &["opencode"]);
+        assert_eq!(opencode.bundles, &[] as &[&str]);
+    }
+
+    #[test]
+    fn empty_spec_is_never_satisfied() {
+        // A spec with no candidates has no way to produce positive evidence —
+        // must return false regardless of the dirs we pass.
+        let spec = InstallSpec { bins: &[], bundles: &[] };
+        let dir = TempDir::new("empty");
+        let dirs = vec![dir.path().to_path_buf()];
+        assert!(!check_install_spec(&spec, &dirs, &dirs));
+    }
+
+    #[test]
+    fn binary_match_satisfies_spec() {
+        let path_dir = TempDir::new("bin");
+        // On Windows binary_in also looks for .exe/.cmd/.bat; create the bare
+        // name first so the test passes on every platform.
+        let exe = path_dir.path().join("foo");
+        fs::write(&exe, b"#!/bin/sh\n").unwrap();
+        let spec = InstallSpec { bins: &["foo"], bundles: &["Nope.app"] };
+        let bundle_dir = TempDir::new("nob");
+        assert!(check_install_spec(
+            &spec,
+            &[path_dir.path().to_path_buf()],
+            &[bundle_dir.path().to_path_buf()],
+        ));
+    }
+
+    #[test]
+    fn bundle_match_satisfies_spec() {
+        let bundle_dir = TempDir::new("bun");
+        // `.app` is just a directory on macOS — for the purpose of `Path::exists`
+        // any directory with the matching name works on every platform.
+        fs::create_dir(bundle_dir.path().join("Demo.app")).unwrap();
+        let spec = InstallSpec { bins: &["nope"], bundles: &["Demo.app"] };
+        let path_dir = TempDir::new("nop");
+        assert!(check_install_spec(
+            &spec,
+            &[path_dir.path().to_path_buf()],
+            &[bundle_dir.path().to_path_buf()],
+        ));
+    }
+
+    #[test]
+    fn neither_match_fails_spec() {
+        let path_dir = TempDir::new("pd");
+        let bundle_dir = TempDir::new("bd");
+        let spec = InstallSpec { bins: &["ghost"], bundles: &["Ghost.app"] };
+        assert!(!check_install_spec(
+            &spec,
+            &[path_dir.path().to_path_buf()],
+            &[bundle_dir.path().to_path_buf()],
+        ));
+    }
+
+    #[test]
+    fn binary_only_match_satisfies_or_spec() {
+        // OR semantics: binary present but bundle missing must still satisfy.
+        let path_dir = TempDir::new("orbin");
+        fs::write(path_dir.path().join("bar"), b"").unwrap();
+        let bundle_dir = TempDir::new("orbinb");
+        let spec = InstallSpec { bins: &["bar"], bundles: &["Missing.app"] };
+        assert!(check_install_spec(
+            &spec,
+            &[path_dir.path().to_path_buf()],
+            &[bundle_dir.path().to_path_buf()],
+        ));
+    }
+
+    #[test]
+    fn bundle_only_match_satisfies_or_spec() {
+        // OR semantics: bundle present but binary missing must still satisfy.
+        let path_dir = TempDir::new("orbun");
+        let bundle_dir = TempDir::new("orbunb");
+        fs::create_dir(bundle_dir.path().join("Only.app")).unwrap();
+        let spec = InstallSpec { bins: &["nope"], bundles: &["Only.app"] };
+        assert!(check_install_spec(
+            &spec,
+            &[path_dir.path().to_path_buf()],
+            &[bundle_dir.path().to_path_buf()],
+        ));
+    }
+
+    #[test]
+    fn binary_in_searches_all_dirs() {
+        let d1 = TempDir::new("first");
+        let d2 = TempDir::new("second");
+        // place the binary only in the second dir — must still be found
+        fs::write(d2.path().join("tool"), b"").unwrap();
+        assert!(binary_in(
+            "tool",
+            &[d1.path().to_path_buf(), d2.path().to_path_buf()]
+        ));
+    }
+
+    #[test]
+    fn binary_in_missing_returns_false() {
+        let d = TempDir::new("none");
+        assert!(!binary_in("ghost", &[d.path().to_path_buf()]));
+    }
+
+    #[test]
+    fn bundle_in_missing_returns_false() {
+        let d = TempDir::new("nobnd");
+        assert!(!bundle_in("Ghost.app", &[d.path().to_path_buf()]));
+    }
+
+    #[test]
+    fn installed_states_length_matches_agents() {
+        // Batch invariant: one bool per input agent, in order.
+        let agents = vec![
+            Agent { name: "totally-fake-1".into(), display: "A".into(), is_gui: false },
+            Agent { name: "totally-fake-2".into(), display: "B".into(), is_gui: false },
+            Agent { name: "totally-fake-3".into(), display: "C".into(), is_gui: false },
+        ];
+        let v = installed_states(&agents);
+        assert_eq!(v.len(), agents.len());
+        // unknowns are reported installed
+        assert!(v.iter().all(|x| *x));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn binary_in_finds_windows_extensions() {
+        let d = TempDir::new("winext");
+        // Windows executables typically end in .exe / .cmd / .bat — verify
+        // each suffix is picked up by the lookup.
+        for (name, ext) in [("foo", "exe"), ("bar", "cmd"), ("baz", "bat")] {
+            fs::write(d.path().join(format!("{name}.{ext}")), b"").unwrap();
+            assert!(
+                binary_in(name, &[d.path().to_path_buf()]),
+                "missing `{name}.{ext}`"
+            );
         }
     }
 }
