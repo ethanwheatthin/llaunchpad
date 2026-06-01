@@ -88,7 +88,7 @@ open Llaunchpad.app
 2. (Optional) Paste your **Ollama host** URL (default `http://localhost:11434`) and hit
    **Test** to pull that server's local models into the dropdown.
 3. Choose an **agent** and a **model** from the inline dropdowns.
-4. Hit **Launch**. The status bar confirms what was started. Click the ✕ to dismiss it.
+4. Hit **Launch**. The status bar confirms what was started. Click the × to dismiss it.
 
 That's it — Llaunchpad runs `ollama launch <agent> --model <model> -y` under the hood and
 brings the agent up configured against your chosen model.

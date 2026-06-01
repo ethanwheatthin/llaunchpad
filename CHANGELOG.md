@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are listed first with a teal **local** badge and a teal dot in the selector. Local
   entries take precedence over cloud entries with the same name.
 - **Dismissible status banner** — the success/error banner at the bottom now has a close
-  button (✕) so it can be cleared without waiting for the next event.
+  button (×) so it can be cleared without waiting for the next event.
 
 ### Changed
 - **CI** now triggers on pull requests as well as `main`, cancels superseded runs on the
@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rebuilt, so the highlight doesn't drop just because the list shape changed.
 
 ### Fixed
-- **Windows**: font-based icons (`▾`, `✕`, etc.) render as glyphs instead of boxes —
+- **Windows**: font-based icons (`▾`, `×`, etc.) render as glyphs instead of boxes —
   explicit `font-family` fallback list on the affected `Text` elements.
 - **Shell command safety**: custom Ollama host URLs are validated/escaped before being
   used in spawned shell commands.

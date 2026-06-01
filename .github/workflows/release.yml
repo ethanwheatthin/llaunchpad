@@ -53,6 +53,7 @@ jobs:
   # ── Check the version in Cargo.toml is new (fails if not bumped) ───────────
   check-version:
     name: Check version
+    if: github.event_name == 'push'
     needs: test
     runs-on: ubuntu-latest
     outputs:
@@ -78,6 +79,7 @@ jobs:
   # ── Build on all three platforms ───────────────────────────────────────────
   build:
     name: Build — ${{ matrix.os }}
+    if: github.event_name == 'push'
     needs: [test, check-version]
     runs-on: ${{ matrix.os }}
     strategy:
@@ -146,6 +148,7 @@ jobs:
   # ── Create GitHub Release ──────────────────────────────────────────────────
   release:
     name: Create GitHub Release
+    if: github.event_name == 'push'
     needs: [check-version, build]
     runs-on: ubuntu-latest
     steps:
@@ -171,6 +174,7 @@ jobs:
   # ── Update Homebrew tap (macOS) ────────────────────────────────────────────
   update-tap:
     name: Update Homebrew tap
+    if: github.event_name == 'push'
     needs: [check-version, release]
     runs-on: ubuntu-latest
     steps:
@@ -222,7 +226,7 @@ jobs:
   cleanup:
     name: Delete artifacts
     needs: [release, update-tap]
-    if: always()
+    if: github.event_name == 'push' && always()
     runs-on: ubuntu-latest
     steps:
       - uses: geekyeggo/delete-artifact@v6
