@@ -143,7 +143,9 @@ component AgentSelect {
         x: 0;
         // expand downward from the field, with the selected row at the head
         y: 0px;
-        width: root.width;
+        // popup may be wider than the field so the "not installed" badge fits
+        // alongside long agent names without overflowing the panel
+        width: max(root.width, 320px);
         height: vis + 12px;
         close-policy: close-on-click-outside;
         Rectangle {
@@ -151,6 +153,7 @@ component AgentSelect {
             border-radius: 10px;
             border-width: 1px;
             border-color: #45475a;
+            clip: true;
             ScrollView {
                 height: vis;
                 viewport-y: (root.open-tick * 0px) - max(0px, min(root.current-index * 36px, items.length * 36px + 12px - vis));
@@ -159,6 +162,7 @@ component AgentSelect {
                     for it[idx] in items: Rectangle {
                         height: 36px;
                         border-radius: 7px;
+                        clip: true;
                         background: idx == root.current-index
                             ? Theme.accent.with-alpha(0.22)
                             : (row-ta.has-hover ? Theme.card : transparent);
@@ -179,6 +183,7 @@ component AgentSelect {
                                 font-size: 14px;
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
+                                overflow: elide;
                                 opacity: it.installed ? 1.0 : 0.55;
                             }
                             if !it.installed: NotInstalledBadge {
