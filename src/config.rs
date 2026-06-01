@@ -2,12 +2,29 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Last-used selection, persisted between runs.
-#[derive(Serialize, Deserialize, Default, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Prefs {
     /// agent token (e.g. "codex-app")
     pub agent: String,
     /// launchable model name (e.g. "glm-4.6:cloud")
     pub model: String,
+    /// Ollama server base URL (e.g. "http://localhost:11434")
+    #[serde(default = "default_ollama_host")]
+    pub ollama_host: String,
+}
+
+fn default_ollama_host() -> String {
+    "http://localhost:11434".to_string()
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Self {
+            agent: String::new(),
+            model: String::new(),
+            ollama_host: default_ollama_host(),
+        }
+    }
 }
 
 fn prefs_path() -> Option<PathBuf> {

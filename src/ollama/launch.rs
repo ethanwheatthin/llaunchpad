@@ -64,8 +64,31 @@ pub fn agent_running(agent: &Agent) -> bool {
 
 // ───────────────────────── platform helpers ─────────────────────────
 
+/// Strip characters that could be interpreted as shell metacharacters from a URL.
+fn shell_safe_url(url: &str) -> String {
+    url.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || "://.\\-_@%+=?&#[]".contains(*c))
+        .collect()
+}
+
 /// Run a shell command line in a new terminal window.
-fn spawn_in_terminal(cmd: &str) -> Result<()> {
+/// If `ollama_host` is provided it is forwarded as `OLLAMA_HOST` so the agent
+/// connects to the right server.
+fn spawn_in_terminal(cmd: &str, ollama_host: Option<&str>) -> Result<()> {
+    // Prepend OLLAMA_HOST=<url> to the command string for each platform.
+    // The host is sanitized before interpolation to guard against shell injection.
+    let full_cmd: String;
+    let cmd = if let Some(host) = ollama_host {
+        let safe = shell_safe_url(host);
+        #[cfg(target_os = "windows")]
+        { full_cmd = format!("set OLLAMA_HOST={safe} && {cmd}"); }
+        #[cfg(not(target_os = "windows"))]
+        { full_cmd = format!("OLLAMA_HOST={safe} {cmd}"); }
+        full_cmd.as_str()
+    } else {
+        cmd
+    };
+
     #[cfg(target_os = "macos")]
     {
         let script = format!(
@@ -256,7 +279,7 @@ fn migrate_codex_profiles(model: &str) -> Result<()> {
 /// Codex (GUI app or CLI): `ollama launch` writes a legacy profile config that
 /// current Codex rejects. Configure first (`--config`), migrate the profile into
 /// its own file, then launch Codex ourselves.
-fn launch_codex(agent: &str, is_gui: bool, model: &str) -> Result<()> {
+fn launch_codex(agent: &str, is_gui: bool, model: &str, ollama_host: Option<&str>) -> Result<()> {
     // close the GUI app if it is already open (relaunch)
     #[cfg(target_os = "macos")]
     if is_gui {
@@ -267,9 +290,12 @@ fn launch_codex(agent: &str, is_gui: bool, model: &str) -> Result<()> {
     }
 
     // configure only — writes the (legacy) profile; ignore its exit status
-    let _ = Command::new(crate::ollama::ollama_bin())
-        .args(["launch", agent, "--model", model, "--config", "-y"])
-        .status();
+    let mut cfg_cmd = Command::new(crate::ollama::ollama_bin());
+    cfg_cmd.args(["launch", agent, "--model", model, "--config", "-y"]);
+    if let Some(host) = ollama_host {
+        cfg_cmd.env("OLLAMA_HOST", host);
+    }
+    let _ = cfg_cmd.status();
 
     migrate_codex_profiles(model)?;
 
@@ -280,14 +306,16 @@ fn launch_codex(agent: &str, is_gui: bool, model: &str) -> Result<()> {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            Command::new(crate::ollama::ollama_bin())
-                .args(["launch", agent, "--model", model, "-y"])
-                .spawn()
-                .context("failed to launch codex-app")?;
+            let mut cmd = Command::new(crate::ollama::ollama_bin());
+            cmd.args(["launch", agent, "--model", model, "-y"]);
+            if let Some(host) = ollama_host {
+                cmd.env("OLLAMA_HOST", host);
+            }
+            cmd.spawn().context("failed to launch codex-app")?;
         }
     } else {
         // CLI: run codex against the migrated profile in a terminal
-        spawn_in_terminal("codex --profile ollama-launch")?;
+        spawn_in_terminal("codex --profile ollama-launch", ollama_host)?;
     }
     Ok(())
 }
@@ -321,10 +349,12 @@ pub fn restore_agent(agent: &str) -> Result<()> {
 // ───────────────────────── public entry point ─────────────────────────
 
 /// Launch (or relaunch) an agent with the given model via `ollama launch`.
-pub fn launch_agent(agent: &Agent, model: &str) -> Result<()> {
+/// `ollama_host` is forwarded as `OLLAMA_HOST` when set, routing the agent
+/// to a custom Ollama server instead of the default localhost.
+pub fn launch_agent(agent: &Agent, model: &str, ollama_host: Option<&str>) -> Result<()> {
     match agent.name.as_str() {
-        "codex-app" => return launch_codex("codex-app", true, model),
-        "codex" => return launch_codex("codex", false, model),
+        "codex-app" => return launch_codex("codex-app", true, model, ollama_host),
+        "codex" => return launch_codex("codex", false, model, ollama_host),
         _ => {}
     }
 
@@ -334,10 +364,12 @@ pub fn launch_agent(agent: &Agent, model: &str) -> Result<()> {
             quit_gui("Visual Studio Code");
         }
         // ollama launch configures the integration and opens the app
-        Command::new(crate::ollama::ollama_bin())
-            .args(["launch", &agent.name, "--model", model, "-y"])
-            .spawn()
-            .with_context(|| format!("failed to launch `{}`", agent.name))?;
+        let mut cmd = Command::new(crate::ollama::ollama_bin());
+        cmd.args(["launch", &agent.name, "--model", model, "-y"]);
+        if let Some(host) = ollama_host {
+            cmd.env("OLLAMA_HOST", host);
+        }
+        cmd.spawn().with_context(|| format!("failed to launch `{}`", agent.name))?;
     } else {
         // CLI agent: run inside a terminal (absolute path: GUI PATH is minimal)
         let cmd = format!(
@@ -346,7 +378,7 @@ pub fn launch_agent(agent: &Agent, model: &str) -> Result<()> {
             agent.name,
             model
         );
-        spawn_in_terminal(&cmd)?;
+        spawn_in_terminal(&cmd, ollama_host)?;
     }
     Ok(())
 }
