@@ -40,6 +40,8 @@ the exact cloud model names, and re-typing the command every time.
 |---|---|
 | **Live agent list** | Parsed from `ollama launch --help` — always in sync with your Ollama version. |
 | **Full cloud catalog** | Every model from `ollama.com/v1/models`, refreshed in the background every 5s. |
+| **Custom Ollama host** | Point at any local or remote Ollama server; **Test** button probes the URL and pulls its local models. |
+| **Local model badge** | Local models from your server show up first in the dropdown, tagged with a teal **local** badge. |
 | **Correct model names** | Cloud ids are auto-normalized to launchable refs (`glm-4.6` → `glm-4.6:cloud`, `gpt-oss:120b` → `gpt-oss:120b-cloud`). |
 | **GUI & CLI agents** | GUI apps (Codex, VS Code) are opened/relaunched; CLI agents spawn in Terminal. |
 | **Codex App fix** | Strips the legacy `profile =` line modern Codex rejects, so launches just work. |
@@ -83,8 +85,10 @@ open Llaunchpad.app
 ## Usage
 
 1. Open Llaunchpad.
-2. Choose an **agent** and a **cloud model** from the inline dropdowns.
-3. Hit **Launch**. The status bar confirms what was started.
+2. (Optional) Paste your **Ollama host** URL (default `http://localhost:11434`) and hit
+   **Test** to pull that server's local models into the dropdown.
+3. Choose an **agent** and a **model** from the inline dropdowns.
+4. Hit **Launch**. The status bar confirms what was started. Click the ✕ to dismiss it.
 
 That's it — Llaunchpad runs `ollama launch <agent> --model <model> -y` under the hood and
 brings the agent up configured against your chosen model.
@@ -128,10 +132,10 @@ Project layout:
 ```
 src/
   main.rs            UI wiring, background refresh, state persistence
-  config.rs          last-used selection (prefs.json)
+  config.rs          last-used selection + ollama_host (prefs.json)
   ollama/
     agents.rs        parse `ollama launch --help`
-    models.rs        fetch + normalize cloud catalog
+    models.rs        cloud catalog + local /api/tags + server probe
     launch.rs        spawn / quit / relaunch, Codex config fix
 ui/app.slint         Slint UI + theme
 assets/              icon, banner, screenshot

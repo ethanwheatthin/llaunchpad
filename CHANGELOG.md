@@ -6,6 +6,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-01
+
+### Added
+- **Custom Ollama base URL** — point Llaunchpad at any Ollama server (local or remote).
+  A new `Ollama host` field plus a **Test** button probe `/api/version` and `/api/tags`,
+  report the server version, and persist the URL in prefs.
+- **Local models in the dropdown** — after a successful test, the server's local models
+  are listed first with a teal **local** badge and a teal dot in the selector. Local
+  entries take precedence over cloud entries with the same name.
+- **Dismissible status banner** — the success/error banner at the bottom now has a close
+  button (✕) so it can be cleared without waiting for the next event.
+
+### Changed
+- **CI** now triggers on pull requests as well as `main`, cancels superseded runs on the
+  same ref, and gates the release job on a **new** `version` in `Cargo.toml` — pushing
+  a build with an already-tagged version fails the workflow.
+- Model list refresh preserves the currently selected model by name when the list is
+  rebuilt, so the highlight doesn't drop just because the list shape changed.
+
+### Fixed
+- **Windows**: font-based icons (`▾`, `✕`, etc.) render as glyphs instead of boxes —
+  explicit `font-family` fallback list on the affected `Text` elements.
+- **Shell command safety**: custom Ollama host URLs are validated/escaped before being
+  used in spawned shell commands.
+- `ollama launch` argument order fixed so Codex / Claude Code pick up the selected
+  model reliably.
+
 ## [0.3.0] - 2026-05-31
 
 ### Added
@@ -88,7 +115,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Persisted last-used agent + model across runs.
 - App icon, banner, and `bundle.sh` to assemble `Llaunchpad.app`.
 
-[Unreleased]: https://github.com/draugvar/llaunchpad/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/draugvar/llaunchpad/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/draugvar/llaunchpad/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/draugvar/llaunchpad/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/draugvar/llaunchpad/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/draugvar/llaunchpad/compare/v0.1.3...v0.2.0
