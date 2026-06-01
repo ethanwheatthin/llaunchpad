@@ -6,8 +6,8 @@ mod ollama;
 slint::include_modules!();
 
 use ollama::{
-    launch_agent, list_agents, list_cloud_models, list_local_models, restore_agent,
-    restore_available, running_states, test_connection, Agent,
+    installed_states, launch_agent, list_agents, list_cloud_models, list_local_models,
+    restore_agent, restore_available, running_states, test_connection, Agent,
 };
 use slint::{Model, ModelRc, SharedString, VecModel};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,7 +39,7 @@ fn color_index(token: &str) -> i32 {
     (sum % PALETTE_LEN as u32) as i32
 }
 
-fn make_agent_items(agents: &[Agent], running: &[bool]) -> Vec<AgentItem> {
+fn make_agent_items(agents: &[Agent], running: &[bool], installed: &[bool]) -> Vec<AgentItem> {
     agents
         .iter()
         .enumerate()
@@ -48,6 +48,7 @@ fn make_agent_items(agents: &[Agent], running: &[bool]) -> Vec<AgentItem> {
             display: a.display.clone().into(),
             is_gui: a.is_gui,
             running: running.get(i).copied().unwrap_or(false),
+            installed: installed.get(i).copied().unwrap_or(true),
             restorable: restore_available(&a.name),
             initials: initials(&a.display).into(),
             color_index: color_index(&a.name),
@@ -103,8 +104,8 @@ fn set_models_preserving_selection(ui: &AppWindow, items: Vec<ModelItem>) {
     ui.set_sel_model_index(new_idx);
 }
 
-/// Fetch agents, their running state, and the cloud model list.
-async fn fetch_all() -> anyhow::Result<(Vec<Agent>, Vec<bool>, Vec<String>)> {
+/// Fetch agents, their running + installed state, and the cloud model list.
+async fn fetch_all() -> anyhow::Result<(Vec<Agent>, Vec<bool>, Vec<bool>, Vec<String>)> {
     let agents = list_agents().await?;
     let models = list_cloud_models()
         .await?
@@ -112,8 +113,13 @@ async fn fetch_all() -> anyhow::Result<(Vec<Agent>, Vec<bool>, Vec<String>)> {
         .map(|m| m.name)
         .collect::<Vec<_>>();
     let agents_for_scan = agents.clone();
-    let running = tokio::task::spawn_blocking(move || running_states(&agents_for_scan)).await?;
-    Ok((agents, running, models))
+    let (running, installed) = tokio::task::spawn_blocking(move || {
+        let r = running_states(&agents_for_scan);
+        let i = installed_states(&agents_for_scan);
+        (r, i)
+    })
+    .await?;
+    Ok((agents, running, installed, models))
 }
 
 fn main() -> anyhow::Result<()> {
@@ -319,14 +325,19 @@ fn main() -> anyhow::Result<()> {
                     });
                 }
                 match fetch_all().await {
-                    Ok((agents, running, cloud_names)) => {
+                    Ok((agents, running, installed, cloud_names)) => {
                         *store.lock().unwrap() = agents.clone();
-                        let items = make_agent_items(&agents, &running);
+                        let items = make_agent_items(&agents, &running, &installed);
 
                         // use a content-hash so we only repaint on real changes
                         let agent_sig: Vec<String> = items
                             .iter()
-                            .map(|it| format!("{}|{}|{}", it.name, it.running, it.restorable))
+                            .map(|it| {
+                                format!(
+                                    "{}|{}|{}|{}",
+                                    it.name, it.running, it.restorable, it.installed
+                                )
+                            })
                             .collect();
 
                         let (agents_changed, models_changed) = {

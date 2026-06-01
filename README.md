@@ -44,6 +44,7 @@ the exact cloud model names, and re-typing the command every time.
 | **Local model badge** | Local models from your server show up first in the dropdown, tagged with a teal **local** badge. |
 | **Correct model names** | Cloud ids are auto-normalized to launchable refs (`glm-4.6` → `glm-4.6:cloud`, `gpt-oss:120b` → `gpt-oss:120b-cloud`). |
 | **GUI & CLI agents** | GUI apps (Codex, VS Code) are opened/relaunched; CLI agents spawn in Terminal. |
+| **Install awareness** | Agents whose app or CLI is missing on the machine get a `not installed` badge and Launch is disabled — no more silent "success" toasts when the integration isn't really there. |
 | **Codex App fix** | Strips the legacy `profile =` line modern Codex rejects, so launches just work. |
 | **One-click restore** | Restore button reverts an agent to its original profile when Ollama has a backup; disabled otherwise. |
 | **Smart "running" badge** | Detects the real GUI process by bundle path — no false positives from background helpers. |

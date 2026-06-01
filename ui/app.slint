@@ -5,6 +5,7 @@ export struct AgentItem {
     display: string,       // label (e.g. "Codex App")
     is-gui: bool,
     running: bool,
+    installed: bool,       // app/CLI detected on this machine
     restorable: bool,      // has an ollama restore backup
     initials: string,      // badge text (e.g. "CA")
     color-index: int,      // slot into Theme.palette
@@ -25,6 +26,7 @@ global Theme {
     out property <color> subtext: #a6adc8;
     out property <color> green: #a6e3a1;
     out property <color> red: #f38ba8;
+    out property <color> warn: #fab387;     // peach — "not installed" indicator
     out property <color> local: #94e2d5;   // teal — local model indicator
     out property <[color]> palette: [
         #89b4fa, #a6e3a1, #fab387, #cba6f7, #f38ba8, #94e2d5, #f9e2af,
@@ -69,6 +71,22 @@ component LocalBadge inherits Rectangle {
     }
 }
 
+// ---- small pill badge shown when an agent's app/CLI is missing ----
+component NotInstalledBadge inherits Rectangle {
+    width: 78px;
+    height: 16px;
+    border-radius: 4px;
+    background: Theme.warn.with-alpha(0.18);
+    Text {
+        text: "not installed";
+        color: Theme.warn;
+        font-size: 9px;
+        font-weight: 800;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
 // ---- custom agent dropdown (badge + name per row) ----
 component AgentSelect {
     in property <[AgentItem]> items;
@@ -80,7 +98,7 @@ component AgentSelect {
 
     property <AgentItem> cur: (current-index >= 0 && current-index < items.length)
         ? items[current-index]
-        : { display: "Select agent", initials: "?", color-index: 0 };
+        : { display: "Select agent", initials: "?", color-index: 0, installed: true };
 
     field := Rectangle {
         background: Theme.card;
@@ -95,12 +113,14 @@ component AgentSelect {
                 y: (parent.height - self.height) / 2;
                 label: cur.initials;
                 color-index: cur.color-index;
+                opacity: cur.installed ? 1.0 : 0.55;
             }
             Text {
                 text: cur.display;
                 color: Theme.text;
                 font-size: 14px;
                 vertical-alignment: center;
+                opacity: cur.installed ? 1.0 : 0.55;
             }
             Rectangle { horizontal-stretch: 1; }
             Text {
@@ -123,7 +143,9 @@ component AgentSelect {
         x: 0;
         // expand downward from the field, with the selected row at the head
         y: 0px;
-        width: root.width;
+        // popup may be wider than the field so the "not installed" badge fits
+        // alongside long agent names without overflowing the panel
+        width: max(root.width, 320px);
         height: vis + 12px;
         close-policy: close-on-click-outside;
         Rectangle {
@@ -131,6 +153,7 @@ component AgentSelect {
             border-radius: 10px;
             border-width: 1px;
             border-color: #45475a;
+            clip: true;
             ScrollView {
                 height: vis;
                 viewport-y: (root.open-tick * 0px) - max(0px, min(root.current-index * 36px, items.length * 36px + 12px - vis));
@@ -139,6 +162,7 @@ component AgentSelect {
                     for it[idx] in items: Rectangle {
                         height: 36px;
                         border-radius: 7px;
+                        clip: true;
                         background: idx == root.current-index
                             ? Theme.accent.with-alpha(0.22)
                             : (row-ta.has-hover ? Theme.card : transparent);
@@ -151,6 +175,7 @@ component AgentSelect {
                                 y: (parent.height - self.height) / 2;
                                 label: it.initials;
                                 color-index: it.color-index;
+                                opacity: it.installed ? 1.0 : 0.55;
                             }
                             Text {
                                 text: it.display;
@@ -158,6 +183,11 @@ component AgentSelect {
                                 font-size: 14px;
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
+                                overflow: elide;
+                                opacity: it.installed ? 1.0 : 0.55;
+                            }
+                            if !it.installed: NotInstalledBadge {
+                                y: (parent.height - self.height) / 2;
                             }
                             Rectangle {
                                 width: 8px; height: 8px; border-radius: 4px;
@@ -448,6 +478,7 @@ export component AppWindow inherits Window {
     property <int> agent-idx: sel-agent-index;
     property <string> agent-token: (sel-agent-index >= 0 && sel-agent-index < agents.length) ? agents[sel-agent-index].name : "";
     property <bool> agent-running: (sel-agent-index >= 0 && sel-agent-index < agents.length) ? agents[sel-agent-index].running : false;
+    property <bool> agent-installed: (sel-agent-index >= 0 && sel-agent-index < agents.length) ? agents[sel-agent-index].installed : true;
     property <bool> agent-restorable: (sel-agent-index >= 0 && sel-agent-index < agents.length) ? agents[sel-agent-index].restorable : false;
     property <string> model-val: (sel-model-index >= 0 && sel-model-index < models.length) ? models[sel-model-index].name : "";
 
@@ -575,7 +606,7 @@ export component AppWindow inherits Window {
             Btn {
                 text: root.agent-running ? "Relaunch" : "Launch";
                 primary: true;
-                enabled: root.agent-token != "" && root.model-val != "";
+                enabled: root.agent-token != "" && root.model-val != "" && root.agent-installed;
                 clicked => { root.launch(root.agent-idx, root.model-val); }
             }
             Btn {
@@ -585,8 +616,10 @@ export component AppWindow inherits Window {
                 clicked => { root.restore(root.agent-idx); }
             }
             Text {
-                text: root.agent-running ? "● running" : "";
-                color: Theme.green;
+                text: root.agent-token != "" && !root.agent-installed
+                    ? "● not installed"
+                    : (root.agent-running ? "● running" : "");
+                color: !root.agent-installed && root.agent-token != "" ? Theme.warn : Theme.green;
                 font-size: 12px;
                 vertical-alignment: center;
             }
