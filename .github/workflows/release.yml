@@ -20,6 +20,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Workaround for transient "Error in the HTTP2 framing layer" failures
+  # when cargo fetches crates from the sparse registry on Windows runners.
+  CARGO_HTTP_MULTIPLEXING: "false"
 
 jobs:
   # ── CI: build + test on every push to main (gates the release) ─────────────
@@ -31,7 +34,7 @@ jobs:
       matrix:
         os: [macos-latest, ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Linux deps
@@ -55,7 +58,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Extract version from Cargo.toml
@@ -87,7 +90,7 @@ jobs:
           - os: windows-latest
             asset: llaunchpad-windows-x86_64.zip
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
 
       # ── macOS: universal .app ────────────────────────────────────────────
@@ -146,7 +149,7 @@ jobs:
     needs: [check-version, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
