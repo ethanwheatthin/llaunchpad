@@ -64,10 +64,15 @@ pub fn agent_running(agent: &Agent) -> bool {
 
 // ───────────────────────── platform helpers ─────────────────────────
 
-/// Strip characters that could be interpreted as shell metacharacters from a URL.
+/// Strip everything that is not part of a plain base URL, so the result is safe
+/// to interpolate into a shell command line. The retained set covers
+/// scheme/host/port plus IPv6 literals (`[::1]`) and optional userinfo (`@`).
+/// Shell metacharacters (`& # ? % = \ | ; < > $ ` ` ` "` `'` space) are dropped —
+/// they have no place in a base URL and `&`/`%` are command separators / env
+/// expansions on cmd.exe and POSIX shells.
 fn shell_safe_url(url: &str) -> String {
     url.chars()
-        .filter(|c| c.is_ascii_alphanumeric() || "://.\\-_@%+=?&#[]".contains(*c))
+        .filter(|c| c.is_ascii_alphanumeric() || "://.-_@[]".contains(*c))
         .collect()
 }
 
@@ -80,8 +85,10 @@ fn spawn_in_terminal(cmd: &str, ollama_host: Option<&str>) -> Result<()> {
     let full_cmd: String;
     let cmd = if let Some(host) = ollama_host {
         let safe = shell_safe_url(host);
+        // Quote the assignment so cmd.exe does not fold the space before `&&`
+        // into the value (`set VAR=x ` would store a trailing space).
         #[cfg(target_os = "windows")]
-        { full_cmd = format!("set OLLAMA_HOST={safe} && {cmd}"); }
+        { full_cmd = format!("set \"OLLAMA_HOST={safe}\"&& {cmd}"); }
         #[cfg(not(target_os = "windows"))]
         { full_cmd = format!("OLLAMA_HOST={safe} {cmd}"); }
         full_cmd.as_str()

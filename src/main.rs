@@ -88,6 +88,21 @@ fn selected_model_name(ui: &AppWindow) -> Option<String> {
     }
 }
 
+/// Replace the UI model list, re-resolving the selected index by name.
+/// Indices are invalidated whenever the list is rebuilt (local models sit at
+/// the front, so dropping them shifts cloud entries); resolving by name keeps
+/// the highlight on the same model, or clears it (-1) if that model is gone.
+fn set_models_preserving_selection(ui: &AppWindow, items: Vec<ModelItem>) {
+    let prev = selected_model_name(ui);
+    let new_idx = prev
+        .as_deref()
+        .and_then(|n| items.iter().position(|m| m.name == n))
+        .map(|i| i as i32)
+        .unwrap_or(-1);
+    ui.set_models(ModelRc::new(VecModel::from(items)));
+    ui.set_sel_model_index(new_idx);
+}
+
 /// Fetch agents, their running state, and the cloud model list.
 async fn fetch_all() -> anyhow::Result<(Vec<Agent>, Vec<bool>, Vec<String>)> {
     let agents = list_agents().await?;
@@ -168,15 +183,8 @@ fn main() -> anyhow::Result<()> {
                                     if test_gen.load(Ordering::SeqCst) != gen { return; }
                                     if let Some(ui) = ui_weak.upgrade() {
                                         let cloud = cloud_names_from_ui(&ui);
-                                        let prev = selected_model_name(&ui);
                                         let items = make_model_items(&fetched, &cloud);
-                                        let new_idx = prev.as_deref()
-                                            .and_then(|n| items.iter().position(|m| m.name == n))
-                                            .map(|i| i as i32);
-                                        ui.set_models(ModelRc::new(VecModel::from(items)));
-                                        if let Some(idx) = new_idx {
-                                            ui.set_sel_model_index(idx);
-                                        }
+                                        set_models_preserving_selection(&ui, items);
                                         ui.set_status(msg.into());
                                         ui.set_status_kind(1);
                                     }
@@ -189,9 +197,10 @@ fn main() -> anyhow::Result<()> {
                                     if test_gen.load(Ordering::SeqCst) != gen { return; }
                                     if let Some(ui) = ui_weak.upgrade() {
                                         let cloud = cloud_names_from_ui(&ui);
-                                        ui.set_models(ModelRc::new(VecModel::from(
+                                        set_models_preserving_selection(
+                                            &ui,
                                             make_model_items(&[], &cloud),
-                                        )));
+                                        );
                                         ui.set_status(msg.into());
                                         ui.set_status_kind(1);
                                     }
@@ -206,9 +215,10 @@ fn main() -> anyhow::Result<()> {
                             if test_gen.load(Ordering::SeqCst) != gen { return; }
                             if let Some(ui) = ui_weak.upgrade() {
                                 let cloud = cloud_names_from_ui(&ui);
-                                ui.set_models(ModelRc::new(VecModel::from(
+                                set_models_preserving_selection(
+                                    &ui,
                                     make_model_items(&[], &cloud),
-                                )));
+                                );
                                 ui.set_status(msg.into());
                                 ui.set_status_kind(2);
                             }
