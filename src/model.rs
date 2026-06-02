@@ -303,3 +303,435 @@ impl AppModel {
         self.repo.restore_available(agent_token)
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the Model.
+    //!
+    //! We use a `FakeRepository` (a `Repository` impl that returns canned
+    //! data without touching the network or the process table) and a
+    //! temp-dir-based `HOME` so `config::save` writes to a throwaway file
+    //! instead of clobbering the user's real prefs.
+    //!
+    //! A single `Mutex` serialises the tests because mutating `HOME` is
+    //! process-global state.
+
+    use super::*;
+    use crate::config::Prefs;
+    use crate::ollama::Agent;
+    use crate::repository::{Repository, TestResult, WorldSnapshot};
+    use crate::test_util::HomeGuard;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+    // Duration used in tokio::time::sleep below.
+
+    /// A `Repository` whose every method returns canned data. Tests
+    /// configure it with an `Arc<Mutex<Inner>>` and inspect calls.
+    struct FakeRepository {
+        inner: Arc<Mutex<FakeInner>>,
+    }
+    struct FakeInner {
+        world: Option<Result<WorldSnapshot, String>>,
+        test: Option<Result<TestResult, String>>,
+        launches: Vec<(String, String, Option<String>)>,
+        restores: Vec<String>,
+        restore_available: std::collections::HashMap<String, bool>,
+    }
+
+    impl FakeRepository {
+        fn new() -> (Arc<Mutex<FakeInner>>, Arc<Self>) {
+            let inner = Arc::new(Mutex::new(FakeInner {
+                world: None,
+                test: None,
+                launches: Vec::new(),
+                restores: Vec::new(),
+                restore_available: std::collections::HashMap::new(),
+            }));
+            let me = Arc::new(Self { inner: inner.clone() });
+            (inner, me)
+        }
+    }
+
+    fn agent(name: &str, display: &str, is_gui: bool) -> Agent {
+        Agent { name: name.to_string(), display: display.to_string(), is_gui }
+    }
+
+    fn world(agents: Vec<Agent>, running: Vec<bool>, installed: Vec<bool>, cloud: Vec<&str>) -> WorldSnapshot {
+        WorldSnapshot {
+            agents,
+            running,
+            installed,
+            cloud_models: cloud.into_iter().map(String::from).collect(),
+        }
+    }
+
+    fn sample_world() -> WorldSnapshot {
+        world(
+            vec![
+                agent("codex-app", "Codex App", true),
+                agent("claude", "Claude", false),
+                agent("vscode", "VS Code", true),
+            ],
+            vec![true, false, false],
+            vec![true, true, false],
+            vec!["gpt-oss:120b-cloud", "glm-4.6:cloud"],
+        )
+    }
+
+    #[async_trait::async_trait]
+    impl Repository for FakeRepository {
+        async fn list_agents(&self) -> Result<Vec<Agent>> {
+            let g = self.inner.lock().unwrap();
+            g.world
+                .as_ref()
+                .expect("test must configure FakeRepository.world")
+                .as_ref()
+                .map(|w| w.agents.clone())
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        }
+        async fn list_cloud_models(&self) -> Result<Vec<crate::ollama::Model>> {
+            let g = self.inner.lock().unwrap();
+            g.world
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .map(|w| {
+                    w.cloud_models
+                        .iter()
+                        .map(|n| crate::ollama::Model { name: n.clone() })
+                        .collect()
+                })
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        }
+        async fn list_local_models(&self, _url: &str) -> Result<Vec<crate::ollama::Model>> {
+            let g = self.inner.lock().unwrap();
+            match g.test.as_ref() {
+                Some(Ok(t)) => Ok(t
+                    .local_models
+                    .iter()
+                    .map(|n| crate::ollama::Model { name: n.clone() })
+                    .collect()),
+                Some(Err(_)) => Ok(Vec::new()),
+                None => Ok(Vec::new()),
+            }
+        }
+        async fn test_connection(&self, _url: &str) -> Result<String> {
+            let g = self.inner.lock().unwrap();
+            g.test
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .map(|t| t.info.clone())
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        }
+        fn running_states(&self, agents: &[Agent]) -> Vec<bool> {
+            let _ = agents;
+            self.inner.lock().unwrap().world.as_ref().unwrap().as_ref().unwrap().running.clone()
+        }
+        fn installed_states(&self, agents: &[Agent]) -> Vec<bool> {
+            let _ = agents;
+            self.inner.lock().unwrap().world.as_ref().unwrap().as_ref().unwrap().installed.clone()
+        }
+        fn restore_available(&self, agent_token: &str) -> bool {
+            self.inner
+                .lock()
+                .unwrap()
+                .restore_available
+                .get(agent_token)
+                .copied()
+                .unwrap_or(false)
+        }
+        async fn restore_agent(&self, agent_token: &str) -> Result<()> {
+            self.inner.lock().unwrap().restores.push(agent_token.to_string());
+            Ok(())
+        }
+        async fn launch_agent(
+            &self,
+            agent: &Agent,
+            model: &str,
+            ollama_host: Option<&str>,
+        ) -> Result<()> {
+            self.inner.lock().unwrap().launches.push((
+                agent.name.clone(),
+                model.to_string(),
+                ollama_host.map(String::from),
+            ));
+            Ok(())
+        }
+    }
+
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    // ─────────────── first_load flag ───────────────
+
+    #[test]
+    fn first_load_flips_after_first_successful_refresh() {
+        let _home = HomeGuard::new("llaunchpad-model-test");
+        let (inner, repo) = FakeRepository::new();
+        inner.lock().unwrap().world = Some(Ok(sample_world()));
+        let prefs = Prefs { agent: "claude".into(), model: "glm-4.6:cloud".into(), ollama_host: "http://x".into() };
+        let model = AppModel::new(repo as Arc<dyn Repository>, prefs);
+        assert!(!model.snapshot().first_load, "starts false");
+        let r = rt();
+        r.block_on(model.refresh());
+        assert!(model.snapshot().first_load, "true after first successful refresh");
+    }
+
+    #[test]
+    fn first_load_stays_false_when_refresh_fails() {
+        let _home = HomeGuard::new("llaunchpad-model-test");
+        let (inner, repo) = FakeRepository::new();
+        inner.lock().unwrap().world = Some(Err("ollama missing".into()));
+        let model = AppModel::new(repo as Arc<dyn Repository>, Prefs::default());
+        let r = rt();
+        r.block_on(model.refresh());
+        assert!(!model.snapshot().first_load);
+    }
+
+    #[test]
+    fn first_load_latches_after_success() {
+        let _home = HomeGuard::new("llaunchpad-model-test");
+        let (inner, repo) = FakeRepository::new();
+        inner.lock().unwrap().world = Some(Ok(sample_world()));
+        let model = AppModel::new(repo as Arc<dyn Repository>, Prefs::default());
+        let r = rt();
+        r.block_on(model.refresh());
+        // Now make subsequent refresh fail; first_load must stay true.
+        inner.lock().unwrap().world = Some(Err("boom".into()));
+        r.block_on(model.refresh());
+        assert!(model.snapshot().first_load);
+    }
+
+    // ─────────────── last_agent / last_model from prefs ───────────────
+
+    #[test]
+    fn prefs_populate_last_agent_and_last_model() {
+        let _home = HomeGuard::new("llaunchpad-model-test");
+        let (_inner, repo) = FakeRepository::new();
+        let prefs = Prefs {
+            agent: "codex-app".into(),
+            model: "gpt-oss:120b-cloud".into(),
+            ollama_host: "http://localhost:11434".into(),
+        };
+        let model = AppModel::new(repo as Arc<dyn Repository>, prefs);
+        let s = model.snapshot();
+        assert_eq!(s.last_agent.as_deref(), Some("codex-app"));
+        assert_eq!(s.last_model.as_deref(), Some("gpt-oss:120b-cloud"));
+    }
+
+    #[test]
+    fn empty_prefs_yield_no_last_agent_or_model() {
+        let _home = HomeGuard::new("llaunchpad-model-test");
+        let (_inner, repo) = FakeRepository::new();
+        let model = AppModel::new(repo as Arc<dyn Repository>, Prefs::default());
+        let s = model.snapshot();
+        assert!(s.last_agent.is_none());
+        assert!(s.last_model.is_none());
+    }
+
+    // ─────────────── status / settings / dismiss ───────────────
+
+    #[test]
+    fn set_status_then_dismiss_clears_the_banner() {
+        let _home = HomeGuard::new("llaunchpad-model-test");
+        let (_inner, repo) = FakeRepository::new();
+        let model = AppModel::new(repo as Arc<dyn Repository>, Prefs::default());
+        model.set_status(Status { message: "ok".into(), kind: 1 });
+        assert_eq!(model.snapshot().status.kind, 1);
+        model.dismiss_status();
+        assert_eq!(model.snapshot().status.kind, 0);
+        assert_eq!(model.snapshot().status.message, "");
+    }
+
+    #[test]
+    fn toggle_settings_flips_and_clamps() {
+        let _home = HomeGuard::new("llaunchpad-model-test");
+        let (_inner, repo) = FakeRepository::new();
+        let model = AppModel::new(repo as Arc<dyn Repository>, Prefs::default());
+        assert!(!model.snapshot().settings_open);
+        model.toggle_settings();
+        assert!(model.snapshot().settings_open);
+        model.set_settings_open(false);
+        assert!(!model.snapshot().settings_open);
+    }
+
+    // ─────────────── test_connection race protection ───────────────
+
+    #[test]
+    fn test_connection_bumps_test_gen_and_publishes_status() {
+        let _home = HomeGuard::new("llaunchpad-model-test");
+        let (inner, repo) = FakeRepository::new();
+        inner.lock().unwrap().test = Some(Ok(TestResult {
+            info: "ok".into(),
+            local_models: vec!["llama3:latest".into()],
+        }));
+        let model = AppModel::new(repo as Arc<dyn Repository>, Prefs::default());
+        let r = rt();
+        let gen1 = r.block_on(model.test_connection("http://h".into()));
+        assert_eq!(gen1, 1);
+        assert_eq!(model.snapshot().status.kind, 1);
+        assert_eq!(model.snapshot().local_models, vec!["llama3:latest"]);
+    }
+
+    #[test]
+    fn test_gen_counter_monotonically_increments() {
+        // The original race in main.rs was: a user clicks Test twice in
+        // quick succession, the first slow response arrives *after* the
+        // second. The model guards against this with `test_gen` and
+        // discards stale responses. We test the bookkeeping, not the
+        // timing.
+        let _home = HomeGuard::new("llaunchpad-model-test");
+        let (inner, repo) = FakeRepository::new();
+        inner.lock().unwrap().test = Some(Ok(TestResult {
+            info: "ok".into(),
+            local_models: vec![],
+        }));
+        let model = AppModel::new(repo as Arc<dyn Repository>, Prefs::default());
+        let r = rt();
+        let g1 = r.block_on(model.test_connection("http://1".into()));
+        let g2 = r.block_on(model.test_connection("http://2".into()));
+        let g3 = r.block_on(model.test_connection("http://3".into()));
+        assert!(g1 < g2 && g2 < g3, "gens strictly increase: {g1} {g2} {g3}");
+        assert_eq!(model.current_test_gen(), g3);
+    }
+
+    #[test]
+    fn test_connection_publishes_status_with_kind_1_on_success() {
+        let _home = HomeGuard::new("llaunchpad-model-test");
+        let (inner, repo) = FakeRepository::new();
+        inner.lock().unwrap().test = Some(Ok(TestResult {
+            info: "ollama v0.5".into(),
+            local_models: vec!["llama3:latest".into(), "qwen2.5:7b".into()],
+        }));
+        let model = AppModel::new(repo as Arc<dyn Repository>, Prefs::default());
+        let r = rt();
+        r.block_on(model.test_connection("http://h".into()));
+        let s = model.snapshot();
+        assert_eq!(s.status.kind, 1);
+        assert!(s.status.message.contains("ollama v0.5"));
+        assert!(s.status.message.contains("2 local models"));
+        assert_eq!(s.local_models.len(), 2);
+    }
+
+    #[test]
+    fn test_connection_publishes_status_with_kind_2_on_error() {
+        let _home = HomeGuard::new("llaunchpad-model-test");
+        let (inner, repo) = FakeRepository::new();
+        inner.lock().unwrap().test = Some(Err("connection refused".into()));
+        let model = AppModel::new(repo as Arc<dyn Repository>, Prefs::default());
+        let r = rt();
+        r.block_on(model.test_connection("http://h".into()));
+        let s = model.snapshot();
+        assert_eq!(s.status.kind, 2);
+        assert!(s.status.message.contains("connection refused"));
+        assert!(s.local_models.is_empty());
+    }
+
+    #[test]
+    fn successful_test_connection_clears_local_models() {
+        // If a previous test populated local_models and the new test
+        // returns no local models, the snapshot must clear the list.
+        let _home = HomeGuard::new("llaunchpad-model-test");
+        let (inner, repo) = FakeRepository::new();
+        inner.lock().unwrap().test = Some(Ok(TestResult {
+            info: "ok".into(),
+            local_models: vec!["stale".into()],
+        }));
+        let model = AppModel::new(repo as Arc<dyn Repository>, Prefs::default());
+        let r = rt();
+        r.block_on(model.test_connection("http://h".into()));
+        assert_eq!(model.snapshot().local_models, vec!["stale"]);
+        // Now a failing test must clear them.
+        inner.lock().unwrap().test = Some(Err("nope".into()));
+        r.block_on(model.test_connection("http://h2".into()));
+        assert!(model.snapshot().local_models.is_empty());
+    }
+
+    // ─────────────── record_* writes prefs ───────────────
+
+    #[test]
+    fn record_launch_persists_agent_and_model() {
+        let _home = HomeGuard::new("llaunchpad-model-test");
+        let (_inner, repo) = FakeRepository::new();
+        let model = AppModel::new(repo as Arc<dyn Repository>, Prefs::default());
+        model.record_launch("claude".into(), "qwen3-coder:cloud".into());
+        let prefs = crate::config::load();
+        assert_eq!(prefs.agent, "claude");
+        assert_eq!(prefs.model, "qwen3-coder:cloud");
+    }
+
+    #[test]
+    fn record_selection_merges_into_existing_prefs() {
+        let _home = HomeGuard::new("llaunchpad-model-test");
+        let (_inner, repo) = FakeRepository::new();
+        // Seed prefs with one field already set.
+        crate::config::save(&Prefs {
+            agent: "old-agent".into(),
+            model: "old-model".into(),
+            ollama_host: "http://x".into(),
+        });
+        let model = AppModel::new(repo as Arc<dyn Repository>, crate::config::load());
+        model.record_selection(Some("new-agent".into()), None);
+        let prefs = crate::config::load();
+        assert_eq!(prefs.agent, "new-agent");
+        assert_eq!(prefs.model, "old-model", "untouched field is preserved");
+    }
+
+    // ─────────────── launch / restore go through the repository ───────────────
+
+    #[test]
+    fn launch_calls_repository_with_agent_model_and_host() {
+        let _home = HomeGuard::new("llaunchpad-model-test");
+        let (inner, repo) = FakeRepository::new();
+        let model = AppModel::new(repo as Arc<dyn Repository>, Prefs::default());
+        let a = agent("claude", "Claude", false);
+        let r = rt();
+        r.block_on(model.launch(a, "gpt-oss:120b-cloud".into(), Some("http://h".into())))
+            .unwrap();
+        let calls = &inner.lock().unwrap().launches;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "claude");
+        assert_eq!(calls[0].1, "gpt-oss:120b-cloud");
+        assert_eq!(calls[0].2.as_deref(), Some("http://h"));
+    }
+
+    #[test]
+    fn restore_calls_repository_with_token() {
+        let _home = HomeGuard::new("llaunchpad-model-test");
+        let (inner, repo) = FakeRepository::new();
+        let model = AppModel::new(repo as Arc<dyn Repository>, Prefs::default());
+        let r = rt();
+        r.block_on(model.restore("claude".into())).unwrap();
+        assert_eq!(inner.lock().unwrap().restores, vec!["claude"]);
+    }
+
+    #[test]
+    fn is_agent_restorable_reflects_repository() {
+        let _home = HomeGuard::new("llaunchpad-model-test");
+        let (inner, repo) = FakeRepository::new();
+        inner.lock().unwrap().restore_available.insert("claude".into(), true);
+        let model = AppModel::new(repo as Arc<dyn Repository>, Prefs::default());
+        assert!(model.is_agent_restorable("claude"));
+        assert!(!model.is_agent_restorable("vscode"));
+    }
+
+    // ─────────────── selection-resolution ───────────────
+
+    #[test]
+    fn agent_by_index_returns_none_for_out_of_range() {
+        let _home = HomeGuard::new("llaunchpad-model-test");
+        let (inner, repo) = FakeRepository::new();
+        inner.lock().unwrap().world = Some(Ok(sample_world()));
+        let model = AppModel::new(repo as Arc<dyn Repository>, Prefs::default());
+        let r = rt();
+        r.block_on(model.refresh());
+        assert!(model.agent_by_index(0).is_some());
+        assert!(model.agent_by_index(99).is_none());
+    }
+}

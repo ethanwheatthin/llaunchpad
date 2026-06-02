@@ -10,6 +10,7 @@ mod model;
 mod ollama;
 mod repository;
 mod slint_generated;
+mod test_util;
 mod view;
 
 use controller::AppController;
