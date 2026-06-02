@@ -48,7 +48,7 @@ component AgentBadge inherits Rectangle {
     height: 26px;
     border-radius: 7px;
     clip: true;
-    background: logo == "claude-code" ? #ffffff : Theme.tint(color-index);
+    background: logo != "" ? #ffffff : Theme.tint(color-index);
 
     if logo == "" : Text {
         text: label;
