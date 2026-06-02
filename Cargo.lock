@@ -2718,6 +2718,7 @@ name = "llaunchpad"
 version = "0.5.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "reqwest",
  "serde",
  "serde_json",

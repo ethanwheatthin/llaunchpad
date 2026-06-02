@@ -8,12 +8,13 @@ repository = "https://github.com/draugvar/llaunchpad"
 
 [dependencies]
 slint = "1.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "fs"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sysinfo = "0.32"
 anyhow = "1"
+async-trait = "0.1"
 
 [build-dependencies]
 slint-build = "1.8"

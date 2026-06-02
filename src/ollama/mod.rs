@@ -4,7 +4,7 @@ pub mod launch;
 
 pub use agents::{list_agents, Agent};
 pub use launch::{installed_states, launch_agent, restore_agent, restore_available, running_states};
-pub use models::{list_cloud_models, list_local_models, test_connection};
+pub use models::{list_cloud_models, list_local_models, test_connection, Model};
 
 use std::sync::OnceLock;
 

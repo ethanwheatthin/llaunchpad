@@ -37,40 +37,6 @@ global Theme {
     }
 }
 
-// ---- vector icon (24x24 viewBox, stroke-based, minimal). Pass `name` to pick one. ----
-component Icon {
-    in property <string> name;          // "chevron-down" | "refresh" | "close" | "gear" | "dot" | "check"
-    in property <color> color: Theme.text;
-    in property <length> size: 16px;
-    in property <length> stroke: 1.75px;
-
-    out property <string> commands:
-        name == "chevron-down" ? "M 6 9 L 12 15 L 18 9" :
-        name == "refresh" ? "M 20 12 A 8 8 0 1 1 12 4 L 12 4 M 12 4 L 8 4 M 12 4 L 12 8" :
-        name == "close" ? "M 6 6 L 18 18 M 18 6 L 6 18" :
-        name == "gear" ? "M 13 2 L 11 2 L 10.6 4.2 L 8.8 5.1 L 6.9 4 L 5.5 5.5 L 6.6 7.4 L 5.7 9.2 L 3.5 9.6 L 3.5 11.6 L 5.7 12 L 6.6 13.8 L 5.5 15.7 L 6.9 17.1 L 8.8 16 L 10.6 16.9 L 11 19.2 L 13 19.2 L 13.4 16.9 L 15.2 16 L 17.1 17.1 L 18.5 15.7 L 17.4 13.8 L 18.3 12 L 20.5 11.6 L 20.5 9.6 L 18.3 9.2 L 17.4 7.4 L 18.5 5.5 L 17.1 4 L 15.2 5.1 L 13.4 4.2 L 13 2 Z M 12 9 A 3 3 0 1 1 12 15 A 3 3 0 1 1 12 9 Z" :
-        name == "check" ? "M 5 12 L 10 17 L 19 7" :
-        name == "dot" ? "M 12 12 m -4 0 a 4 4 0 1 0 8 0 a 4 4 0 1 0 -8 0 Z" :
-        "";
-    out property <bool> filled: name == "gear" || name == "dot";
-
-    width: size;
-    height: size;
-    Path {
-        width: 100%;
-        height: 100%;
-        fill: root.filled ? root.color : transparent;
-        stroke: root.filled ? transparent : root.color;
-        stroke-width: root.stroke;
-        viewbox-x: 0;
-        viewbox-y: 0;
-        viewbox-width: 24;
-        viewbox-height: 24;
-        commands: root.commands;
-    }
-}
-
-
 // ---- colored initials badge ----
 component AgentBadge inherits Rectangle {
     in property <string> label;
@@ -91,14 +57,14 @@ component AgentBadge inherits Rectangle {
 
 // ---- small pill badge shown next to local model names ----
 component LocalBadge inherits Rectangle {
-    width: 42px;
-    height: 20px;
-    border-radius: 5px;
+    width: 34px;
+    height: 16px;
+    border-radius: 4px;
     background: Theme.local.with-alpha(0.18);
     Text {
         text: "local";
         color: Theme.local;
-        font-size: 11px;
+        font-size: 9px;
         font-weight: 800;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -107,14 +73,14 @@ component LocalBadge inherits Rectangle {
 
 // ---- small pill badge shown when an agent's app/CLI is missing ----
 component NotInstalledBadge inherits Rectangle {
-    width: 98px;
-    height: 20px;
-    border-radius: 5px;
+    width: 78px;
+    height: 16px;
+    border-radius: 4px;
     background: Theme.warn.with-alpha(0.18);
     Text {
         text: "not installed";
         color: Theme.warn;
-        font-size: 11px;
+        font-size: 9px;
         font-weight: 800;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -157,12 +123,12 @@ component AgentSelect {
                 opacity: cur.installed ? 1.0 : 0.55;
             }
             Rectangle { horizontal-stretch: 1; }
-            Icon {
-                name: "chevron-down";
+            Text {
+                text: "▾";
                 color: Theme.subtext;
-                size: 18px;
-                stroke: 1.75px;
-                y: (parent.height - self.height) / 2;
+                font-size: 18px;
+                font-weight: 700;
+                vertical-alignment: center;
             }
         }
         ta := TouchArea {
@@ -281,12 +247,12 @@ component ModelSelect {
                 vertical-alignment: center;
             }
             Rectangle { horizontal-stretch: 1; }
-            Icon {
-                name: "chevron-down";
+            Text {
+                text: "▾";
                 color: Theme.subtext;
-                size: 18px;
-                stroke: 1.75px;
-                y: (parent.height - self.height) / 2;
+                font-size: 18px;
+                font-weight: 700;
+                vertical-alignment: center;
             }
         }
         ta := TouchArea {
@@ -428,13 +394,14 @@ component Banner {
                 background: close-ta.has-hover
                     ? root.fg.with-alpha(0.18)
                     : transparent;
-                Icon {
-                    name: "close";
+                Text {
+                    text: "×";
                     color: root.fg;
-                    size: 18px;
-                    stroke: 1.75px;
-                    y: (parent.height - self.height) / 2;
-                    x: (parent.width - self.width) / 2;
+                    font-family: "Arial, Helvetica, Liberation Sans, DejaVu Sans, sans-serif";
+                    font-size: 16px;
+                    font-weight: 400;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
                 }
                 close-ta := TouchArea {
                     clicked => { root.close(); }
@@ -480,7 +447,7 @@ component Btn {
 
 // ---- small square icon button (toolbar actions: refresh, settings, ...) ----
 component IconBtn {
-    in property <string> name;          // icon name (see Icon component)
+    in property <string> text;          // single-glyph icon
     in property <bool> active: false;   // toggle-on highlight (e.g. settings open)
     in property <bool> enabled: true;
     callback clicked();
@@ -495,13 +462,13 @@ component IconBtn {
         border-width: root.active ? 1px : 0px;
         border-color: Theme.accent.with-alpha(0.5);
         opacity: root.enabled ? 1.0 : 0.45;
-        Icon {
-            name: root.name;
+        Text {
+            text: root.text;
             color: root.active ? Theme.accent : Theme.subtext;
-            size: 20px;
-            stroke: 1.85px;
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
+            font-size: 16px;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
         }
         ta := TouchArea {
             enabled: root.enabled;
@@ -544,13 +511,13 @@ component SettingsPanel {
                     border-radius: 6px;
                     y: (parent.height - self.height) / 2;
                     background: close-ta.has-hover ? Theme.card : transparent;
-                    Icon {
-                        name: "close";
+                    Text {
+                        text: "\u{2715}";        // ✕
                         color: Theme.subtext;
-                        size: 18px;
-                        stroke: 1.75px;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
+                        font-size: 14px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
                     }
                     close-ta := TouchArea {
                         clicked => { root.close(); }
@@ -671,37 +638,12 @@ export component AppWindow inherits Window {
                     font-size: 12px;
                     vertical-alignment: center;
                 }
-                refresh-btn := Rectangle {
-                    height: 34px;
-                    min-width: 100px;
-                    border-radius: 8px;
-                    background: refresh-ta.has-hover ? Theme.card.brighter(0.25) : Theme.card;
-                    HorizontalLayout {
-                        padding-left: 14px;
-                        padding-right: 16px;
-                        spacing: 8px;
-                        alignment: center;
-                        Icon {
-                            name: "refresh";
-                            color: Theme.text;
-                            size: 18px;
-                            stroke: 2.2px;
-                            y: (parent.height - self.height) / 2;
-                        }
-                        Text {
-                            text: "Refresh";
-                            color: Theme.text;
-                            font-size: 14px;
-                            font-weight: 700;
-                            vertical-alignment: center;
-                        }
-                    }
-                    refresh-ta := TouchArea {
-                        clicked => { root.refresh(); }
-                    }
+                Btn {
+                    text: "↻ Refresh";
+                    clicked => { root.refresh(); }
                 }
                 IconBtn {
-                    name: "gear";
+                    text: "⚙";                        // ⚙ gear
                     active: root.settings-open;
                     clicked => { root.toggle-settings(); }
                 }
@@ -795,25 +737,13 @@ export component AppWindow inherits Window {
                 enabled: root.agent-restorable;
                 clicked => { root.restore(root.agent-idx); }
             }
-            HorizontalLayout {
-                spacing: 6px;
-                alignment: start;
-                Icon {
-                    name: "dot";
-                    color: !root.agent-installed && root.agent-token != ""
-                        ? Theme.warn
-                        : (root.agent-running ? Theme.green : transparent);
-                    size: 10px;
-                    y: (parent.height - self.height) / 2;
-                }
-                Text {
-                    text: root.agent-token != "" && !root.agent-installed
-                        ? "not installed"
-                        : (root.agent-running ? "running" : "");
-                    color: !root.agent-installed && root.agent-token != "" ? Theme.warn : Theme.green;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                }
+            Text {
+                text: root.agent-token != "" && !root.agent-installed
+                    ? "● not installed"
+                    : (root.agent-running ? "● running" : "");
+                color: !root.agent-installed && root.agent-token != "" ? Theme.warn : Theme.green;
+                font-size: 12px;
+                vertical-alignment: center;
             }
         }
 
