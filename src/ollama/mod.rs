@@ -58,8 +58,16 @@ fn resolve_ollama() -> String {
 }
 
 #[cfg(windows)]
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+#[cfg(windows)]
 fn resolve_ollama() -> String {
-    if let Ok(out) = std::process::Command::new("where").arg("ollama").output() {
+    use std::os::windows::process::CommandExt;
+    if let Ok(out) = std::process::Command::new("where")
+        .arg("ollama")
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
         let s = String::from_utf8_lossy(&out.stdout);
         if let Some(first) = s.lines().next() {
             let first = first.trim();

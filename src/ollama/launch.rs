@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
@@ -284,16 +286,10 @@ fn spawn_in_terminal(
     }
     #[cfg(target_os = "windows")]
     {
-        // The new console started by `start` inherits the current directory of
-        // the cmd process we spawn, so set it directly.
-        let mut c = Command::new("cmd");
-        c.args(["/C", "start", "cmd", "/K", cmd]);
-        if let Some(dir) = working_dir {
-            if !dir.is_empty() {
-                c.current_dir(dir);
-            }
-        }
-        c.spawn().context("failed to open cmd")?;
+        let mut cmd_proc = Command::new("cmd");
+        cmd_proc.args(["/C", "start", "cmd", "/K", cmd]);
+        cmd_proc.creation_flags(super::CREATE_NO_WINDOW);
+        cmd_proc.spawn().context("failed to open cmd")?;
         return Ok(());
     }
 }
@@ -468,6 +464,8 @@ fn launch_codex(
     if let Some(host) = ollama_host {
         cfg_cmd.env("OLLAMA_HOST", host);
     }
+    #[cfg(windows)]
+    cfg_cmd.creation_flags(super::CREATE_NO_WINDOW);
     let _ = cfg_cmd.status();
 
     migrate_codex_profiles(model)?;
@@ -484,11 +482,8 @@ fn launch_codex(
             if let Some(host) = ollama_host {
                 cmd.env("OLLAMA_HOST", host);
             }
-            if let Some(dir) = working_dir {
-                if !dir.is_empty() {
-                    cmd.current_dir(dir);
-                }
-            }
+            #[cfg(windows)]
+            cmd.creation_flags(super::CREATE_NO_WINDOW);
             cmd.spawn().context("failed to launch codex-app")?;
         }
     } else {
@@ -514,8 +509,11 @@ pub fn restore_available(agent: &str) -> bool {
 
 /// Restore an agent to its original (pre-Ollama) profile.
 pub fn restore_agent(agent: &str) -> Result<()> {
-    let status = Command::new(crate::ollama::ollama_bin())
-        .args(["launch", agent, "--restore", "-y"])
+    let mut restore_cmd = Command::new(crate::ollama::ollama_bin());
+    restore_cmd.args(["launch", agent, "--restore", "-y"]);
+    #[cfg(windows)]
+    restore_cmd.creation_flags(super::CREATE_NO_WINDOW);
+    let status = restore_cmd
         .status()
         .with_context(|| format!("failed to restore `{agent}`"))?;
     if !status.success() {
@@ -566,9 +564,8 @@ pub fn launch_agent(
         if let Some(host) = ollama_host {
             cmd.env("OLLAMA_HOST", host);
         }
-        if let Some(dir) = working_dir {
-            cmd.current_dir(dir);
-        }
+        #[cfg(windows)]
+        cmd.creation_flags(super::CREATE_NO_WINDOW);
         cmd.spawn().with_context(|| format!("failed to launch `{}`", agent.name))?;
     } else {
         // CLI agent: run inside a terminal (absolute path: GUI PATH is minimal)

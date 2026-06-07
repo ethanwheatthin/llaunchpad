@@ -14,6 +14,56 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// Map a cloud model name to its provider slug (matches ProviderLogo in app.slint).
+fn provider_for_model(name: &str) -> &'static str {
+    let n = name.split(':').next().unwrap_or(name);
+    // OpenAI skipped "o2"; add it here if they ever release one.
+    if n.starts_with("gpt-") || n.starts_with("o1") || n.starts_with("o2") || n.starts_with("o3") || n.starts_with("o4") {
+        "openai"
+    } else if n.starts_with("gemini") {
+        "gemini"
+    } else if n.starts_with("gemma") {
+        "gemma"
+    } else if n.starts_with("mistral") || n.starts_with("ministral") || n.starts_with("devstral") {
+        "mistral"
+    } else if n.starts_with("deepseek") {
+        "deepseek"
+    } else if n.starts_with("qwen") {
+        "qwen"
+    } else if n.starts_with("glm") {
+        "zhipu"
+    } else if n.starts_with("kimi") || n.starts_with("moonshot") {
+        "moonshot"
+    } else if n.starts_with("nemotron") {
+        "nvidia"
+    } else if n.starts_with("minimax") {
+        "minimax"
+    } else {
+        "ollama"
+    }
+}
+
+/// Map an agent launch token to its logo key (matches AgentBadge in app.slint).
+/// Returns "" for unknown agents so the initials badge is used as fallback.
+fn logo_for_agent(name: &str) -> &'static str {
+    match name {
+        "claude" | "claude-code"                        => "claude-code",
+        "codex-app" | "codex-desktop" | "codex-gui"
+        | "codex"                                       => "codex",
+        "opencode"                                      => "opencode",
+        "hermes" | "hermes-agent"                       => "hermes",
+        "openclaw"                                      => "openclaw",
+        "cursor"                                        => "cursor",
+        "windsurf"                                      => "windsurf",
+        "copilot" | "github-copilot"                    => "copilot",
+        "cline"                                         => "cline",
+        "amp"                                           => "amp",
+        "goose"                                         => "goose",
+        "vscode" | "code"                               => "vscode",
+        _                                               => "",
+    }
+}
+
 /// Up to two uppercase initials from the agent label.
 fn initials(display: &str) -> String {
     let words: Vec<&str> = display
@@ -52,6 +102,7 @@ fn make_agent_items(agents: &[Agent], running: &[bool], installed: &[bool]) -> V
             restorable: restore_available(&a.name),
             initials: initials(&a.display).into(),
             color_index: color_index(&a.name),
+            logo: logo_for_agent(&a.name).into(),
         })
         .collect()
 }
@@ -61,11 +112,19 @@ fn make_agent_items(agents: &[Agent], running: &[bool], installed: &[bool]) -> V
 fn make_model_items(local: &[String], cloud: &[String]) -> Vec<ModelItem> {
     let mut items: Vec<ModelItem> = local
         .iter()
-        .map(|n| ModelItem { name: n.as_str().into(), is_local: true })
+        .map(|n| ModelItem {
+            name: n.as_str().into(),
+            is_local: true,
+            provider: "ollama".into(),
+        })
         .collect();
     for n in cloud {
         if !local.iter().any(|l| l == n) {
-            items.push(ModelItem { name: n.as_str().into(), is_local: false });
+            items.push(ModelItem {
+                name: n.as_str().into(),
+                is_local: false,
+                provider: provider_for_model(n).into(),
+            });
         }
     }
     items
@@ -334,6 +393,12 @@ fn main() -> anyhow::Result<()> {
                 }
                 match fetch_all().await {
                     Ok((agents, running, installed, cloud_names)) => {
+                        // sort: agents with logos first, no-logo agents last (stable)
+                        let mut order: Vec<usize> = (0..agents.len()).collect();
+                        order.sort_by_key(|&i| if logo_for_agent(&agents[i].name).is_empty() { 1i32 } else { 0i32 });
+                        let agents: Vec<Agent> = order.iter().map(|&i| agents[i].clone()).collect();
+                        let running: Vec<bool> = order.iter().map(|&i| running[i]).collect();
+                        let installed: Vec<bool> = order.iter().map(|&i| installed[i]).collect();
                         *store.lock().unwrap() = agents.clone();
                         let items = make_agent_items(&agents, &running, &installed);
 
