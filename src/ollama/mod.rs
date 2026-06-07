@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod logos;
 pub mod models;
 pub mod launch;
 
@@ -7,8 +8,7 @@ pub use launch::{
     installed_states, launch_agent, pick_directory, restore_agent, restore_available,
     running_states,
 };
-pub use models::{list_cloud_models, list_local_models, test_connection};
-pub use launch::{installed_states, launch_agent, restore_agent, restore_available, running_states};
+pub use logos::provider_for_model;
 pub use models::{list_cloud_models, list_local_models, test_connection, Model};
 
 use std::sync::OnceLock;

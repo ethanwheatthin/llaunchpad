@@ -9,6 +9,11 @@ pub struct Agent {
     pub display: String,
     /// GUI app (open + quit via app name) vs CLI (spawn in Terminal)
     pub is_gui: bool,
+    /// Logo key matching an entry in `assets/logos/*.png`. Empty
+    /// means "use the colored-initials fallback in the badge".
+    /// Computed by `logo_for_agent` so the parsing helper stays
+    /// dumb (it just reads `ollama launch --help`).
+    pub logo: String,
 }
 
 /// GUI integrations: launched as desktop apps. Others run in a terminal.
@@ -52,6 +57,9 @@ fn parse_agents(help: &str) -> Vec<Agent> {
             if name.is_empty() {
                 continue;
             }
+            // Default display: capitalised name. Real display strings come
+            // from ollama's help output (e.g. "Codex App"); we only fall
+            // back to a name-derived display when the parser didn't find one.
             let mut display = it.next().unwrap_or("").trim().to_string();
             // drop the "(aliases: ...)" suffix from the label
             if let Some(idx) = display.find("(aliases:") {
@@ -61,10 +69,33 @@ fn parse_agents(help: &str) -> Vec<Agent> {
                 display = name.clone();
             }
             let is_gui = is_gui(&name);
-            agents.push(Agent { name, display, is_gui });
+            let logo = logo_for_agent(&name);
+            agents.push(Agent { name, display, is_gui, logo });
         }
     }
     agents
+}
+
+/// Map an agent launch token to its logo key (matches AgentBadge in app.slint).
+/// Returns "" for unknown agents so the initials badge is used as fallback.
+pub fn logo_for_agent(name: &str) -> String {
+    let key: &'static str = match name {
+        "claude" | "claude-code"                        => "claude-code",
+        "codex-app" | "codex-desktop" | "codex-gui"
+        | "codex"                                       => "codex",
+        "opencode"                                      => "opencode",
+        "hermes" | "hermes-agent"                       => "hermes",
+        "openclaw"                                      => "openclaw",
+        "cursor"                                        => "cursor",
+        "windsurf"                                      => "windsurf",
+        "copilot" | "github-copilot"                    => "copilot",
+        "cline"                                         => "cline",
+        "amp"                                           => "amp",
+        "goose"                                         => "goose",
+        "vscode" | "code"                               => "vscode",
+        _                                               => "",
+    };
+    key.to_string()
 }
 
 #[cfg(test)]

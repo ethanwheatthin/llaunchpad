@@ -50,6 +50,7 @@ pub trait Repository: Send + Sync {
         agent: &Agent,
         model: &str,
         ollama_host: Option<&str>,
+        working_dir: Option<&str>,
         terminal: &Terminal,
     ) -> Result<()>;
 
@@ -121,14 +122,16 @@ impl Repository for OllamaRepository {
         agent: &Agent,
         model: &str,
         ollama_host: Option<&str>,
+        working_dir: Option<&str>,
         terminal: &Terminal,
     ) -> Result<()> {
         let agent = agent.clone();
         let model = model.to_string();
         let host = ollama_host.map(|s| s.to_string());
+        let dir = working_dir.map(|s| s.to_string());
         let terminal = *terminal;
         tokio::task::spawn_blocking(move || {
-            launch_agent(&agent, &model, host.as_deref(), &terminal)
+            launch_agent(&agent, &model, host.as_deref(), dir.as_deref(), &terminal)
         })
         .await?
     }

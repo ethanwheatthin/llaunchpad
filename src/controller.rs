@@ -88,11 +88,15 @@ impl Controller for AppController {
         let terminal = crate::terminal::Terminal::from_key(
             &self.view_state.selected_terminal_key(),
         );
+        // Snapshot the working dir into an owned String so the borrow
+        // survives the async move into the tokio task.
+        let working_dir: String = self.view_state.working_dir();
         self.model.record_launch(agent.name.clone(), model.clone());
         let m = self.model.clone();
         let sink = self.sink.clone();
         tokio::spawn(async move {
-            let res = m.launch(agent.clone(), model.clone(), Some(host), terminal).await;
+            let dir_opt = if working_dir.is_empty() { None } else { Some(working_dir.as_str()) };
+            let res = m.launch(agent.clone(), model.clone(), Some(host), dir_opt, terminal).await;
             let (msg, kind) = match res {
                 Ok(()) if terminal == crate::terminal::Terminal::Warp => (
                     "✓ Warp opened · command on clipboard — press Cmd+V in Warp".to_string(),
@@ -167,6 +171,31 @@ impl Controller for AppController {
     fn on_terminal_changed(&self, key: String) {
         self.model.set_terminal(key);
     }
+    fn on_working_dir_changed(&self, dir: String) {
+        self.model.set_working_dir(dir);
+    }
+    fn on_pick_directory(&self) {
+        // Read the current value so the dialog can be seeded at it
+        // (the native dialog has a "Start at" / "default location"
+        // field that\'s much more useful when pre-populated).
+        let start = self.view_state.working_dir();
+        let m = self.model.clone();
+        let sink = self.sink.clone();
+        let weak = self.sink.weak_ui();
+        std::thread::spawn(move || {
+            let start_opt = if start.is_empty() { None } else { Some(start.as_str()) };
+            if let Some(dir) = crate::ollama::pick_directory(start_opt) {
+                // Persist + push the new value to the UI thread.
+                m.set_working_dir(dir.clone());
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_working_dir(dir.into());
+                    }
+                });
+            }
+            let _ = sink;
+        });
+    }
 }
 
 
@@ -193,13 +222,13 @@ mod tests {
     struct FakeInner {
         world: Option<Result<WorldSnapshot, String>>,
         test: Option<Result<TestResult, String>>,
-        launches: Vec<(String, String, Option<String>, crate::terminal::Terminal)>,
+        launches: Vec<(String, String, Option<String>, Option<String>, crate::terminal::Terminal)>,
         restores: Vec<String>,
     }
     struct FakeRepository(Arc<Mutex<FakeInner>>);
 
     fn agent(name: &str, display: &str, is_gui: bool) -> Agent {
-        Agent { name: name.to_string(), display: display.to_string(), is_gui }
+        Agent { name: name.to_string(), display: display.to_string(), is_gui, logo: String::new() }
     }
     fn world(agents: Vec<Agent>) -> WorldSnapshot {
         let running = vec![false; agents.len()];
@@ -250,12 +279,14 @@ mod tests {
             agent: &Agent,
             model: &str,
             host: Option<&str>,
+            working_dir: Option<&str>,
             terminal: &crate::terminal::Terminal,
         ) -> Result<()> {
             self.0.lock().unwrap().launches.push((
                 agent.name.clone(),
                 model.to_string(),
                 host.map(String::from),
+                working_dir.map(String::from),
                 *terminal,
             ));
             Ok(())
@@ -327,6 +358,7 @@ mod tests {
         fn selected_agent_token(&self) -> Option<String> { None }
         fn selected_model_name(&self) -> Option<String> { None }
         fn selected_terminal_key(&self) -> String { String::new() }
+        fn working_dir(&self) -> String { String::new() }
     }
 
     fn rt() -> tokio::runtime::Runtime {

@@ -28,6 +28,12 @@ pub enum ViewCommand {
 #[derive(Clone)]
 pub struct ViewSink {
     tx: mpsc::UnboundedSender<ViewCommand>,
+    /// Weak handle to the Slint window, so background threads can
+    /// push UI updates (e.g. the result of a folder-picker dialog)
+    /// via `slint::invoke_from_event_loop` without holding a
+    /// strong reference. `None` in test-only `ViewSink::for_test`
+    /// instances that don't have a real window.
+    ui: Option<slint::Weak<AppWindow>>,
 }
 
 impl ViewSink {
@@ -35,7 +41,18 @@ impl ViewSink {
     /// provided `UnboundedReceiver`. Not used in production.
     #[doc(hidden)]
     pub fn for_test(tx: mpsc::UnboundedSender<ViewCommand>) -> Self {
-        Self { tx }
+        // No real Slint window in tests; the controller\'s UI-push
+        // paths check for None and silently no-op.
+        Self { tx, ui: None }
+    }
+
+    /// Borrow a weak handle to the Slint window. Background threads
+    /// (folder picker, restore, etc.) upgrade it on the UI thread via
+    /// `slint::invoke_from_event_loop` to push UI updates without
+    /// holding a strong reference to the window. Returns an empty
+    /// weak in test-only `ViewSink` instances.
+    pub fn weak_ui(&self) -> slint::Weak<AppWindow> {
+        self.ui.clone().unwrap_or_default()
     }
 }
 
@@ -58,6 +75,9 @@ pub trait ViewState: Send + Sync {
     fn selected_model_name(&self) -> Option<String>;
     /// Key of the user-selected terminal (empty = system default).
     fn selected_terminal_key(&self) -> String;
+    /// User-entered working directory. Empty = inherit the
+    /// launcher\'s cwd.
+    fn working_dir(&self) -> String;
 }
 
 /// Controller callbacks the View invokes when the user interacts with
@@ -74,6 +94,12 @@ pub trait Controller: Send + Sync {
     fn on_selection_changed(&self, agent: Option<String>, model: Option<String>);
     fn on_ollama_host_edited(&self, url: String);
     fn on_terminal_changed(&self, key: String);
+    /// User typed in the working directory field.
+    fn on_working_dir_changed(&self, dir: String);
+    /// User clicked "Browse...". The Controller will run the native
+    /// folder picker off the UI thread and push the chosen path back
+    /// to the View.
+    fn on_pick_directory(&self);
 }
 
 // ───────────────────── helpers ─────────────────────
@@ -146,7 +172,7 @@ impl SlintAppView {
         let ui = AppWindow::new().expect("failed to create AppWindow");
         ui.set_version(env!("CARGO_PKG_VERSION").into());
         let (tx, rx) = mpsc::unbounded_channel();
-        let sink = ViewSink { tx };
+        let sink = ViewSink { tx, ui: Some(ui.as_weak()) };
         Rc::new(Self {
             ui,
             controller: std::sync::Mutex::new(None),
@@ -198,6 +224,25 @@ impl SlintAppView {
             self.ui.on_select_terminal(move |key| {
                 if let Some(cc) = c.upgrade() {
                     cc.on_terminal_changed(key.to_string());
+                }
+            });
+        }
+        // working dir typed in the field
+        {
+            let c = controller.clone();
+            self.ui.on_working_dir_changed(move |dir| {
+                if let Some(cc) = c.upgrade() {
+                    cc.on_working_dir_changed(dir.to_string());
+                }
+            });
+        }
+        // working dir picker — spawn a thread so the modal
+        // dialog doesn\'t block the UI.
+        {
+            let c = controller.clone();
+            self.ui.on_pick_directory(move || {
+                if let Some(cc) = c.upgrade() {
+                    cc.on_pick_directory();
                 }
             });
         }
@@ -461,6 +506,12 @@ impl ViewState for SlintViewState {
             .map(|ui| ui.get_sel_terminal_key().to_string())
             .unwrap_or_default()
     }
+    fn working_dir(&self) -> String {
+        self.ui_weak
+            .upgrade()
+            .map(|ui| ui.get_working_dir().to_string())
+            .unwrap_or_default()
+    }
 }
 
 // ───────────────────── builders ─────────────────────
@@ -478,6 +529,11 @@ fn build_agent_items(w: &WorldSnapshot) -> Vec<AgentItem> {
             restorable: crate::ollama::restore_available(&a.name),
             initials: initials(&a.display).into(),
             color_index: color_index(&a.name),
+            // ollama::Agent already carries its logo key (set in the
+            // parser); we just forward it. The Slint badge component
+            // falls back to the colored-initials display when the
+            // key is empty or unknown.
+            logo: a.logo.clone().into(),
         })
         .collect()
 }
@@ -485,11 +541,22 @@ fn build_agent_items(w: &WorldSnapshot) -> Vec<AgentItem> {
 fn build_model_items(local: &[String], cloud: &[String]) -> Vec<ModelItem> {
     let mut items: Vec<ModelItem> = local
         .iter()
-        .map(|n| ModelItem { name: n.as_str().into(), is_local: true })
+        .map(|n| ModelItem {
+            name: n.as_str().into(),
+            is_local: true,
+            // Local entries get the "ollama" provider badge; the
+            // controller already filtered to ones actually on the
+            // configured server, so we know they came from /api/tags.
+            provider: SharedString::from("ollama"),
+        })
         .collect();
     for n in cloud {
         if !local.iter().any(|l| l == n) {
-            items.push(ModelItem { name: n.as_str().into(), is_local: false });
+            items.push(ModelItem {
+                name: n.as_str().into(),
+                is_local: false,
+                provider: SharedString::from(crate::ollama::logos::provider_for_model(n)),
+            });
         }
     }
     items

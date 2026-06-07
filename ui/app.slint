@@ -497,6 +497,7 @@ component ThemedInput {
     in-out property <string> text;
     in property <string> placeholder-text: "";
     callback accepted(string);
+    callback edited(string);
     height: 34px;
     min-width: 200px;
 
@@ -515,6 +516,7 @@ component ThemedInput {
                 vertical-alignment: center;
                 single-line: true;
                 accepted => { root.accepted(self.text); }
+                edited => { root.edited(self.text); }
             }
         }
         // placeholder overlay — visible when the field is empty and unfocused
@@ -758,8 +760,8 @@ export component AppWindow inherits Window {
     // fixed size — non resizable (min == max)
     min-width: 760px;
     max-width: 760px;
-    min-height: 440px;
-    max-height: 440px;
+    min-height: 500px;
+    max-height: 500px;
     background: Theme.bg;
     // "Segoe UI Symbol" is used as the default because it contains the Unicode
     // glyphs used as icons (▾ ↻ ✕ ● ✓ ✗) while still rendering Latin text
@@ -804,6 +806,7 @@ export component AppWindow inherits Window {
     callback refresh();
     callback test-connection(string /*ollama host url*/);
     callback pick-directory();
+    callback working-dir-changed(string);
     callback dismiss();
     callback select-terminal(string /*terminal key*/);
 
@@ -877,11 +880,15 @@ export component AppWindow inherits Window {
                         clicked => { root.refresh(); }
                     }
                 }
-                IconBtn {
-                    name: "gear";
-                    active: root.settings-open;
-                    clicked => { root.toggle-settings(); }
-                }
+                // Settings gear is hidden in this interim release while
+                // the new settings UI is still being designed. Restore
+                // by removing this comment block + uncommenting the
+                // IconBtn below.
+                // IconBtn {
+                //     name: "gear";
+                //     active: root.settings-open;
+                //     clicked => { root.toggle-settings(); }
+                // }
             }
         }
 
@@ -926,6 +933,7 @@ export component AppWindow inherits Window {
                 text <=> root.working-dir;
                 placeholder-text: "Working directory";
                 horizontal-stretch: 1;
+                edited(text) => { root.working-dir-changed(self.text); }
             }
             Btn {
                 text: "Browse…";
@@ -1022,7 +1030,7 @@ export component AppWindow inherits Window {
         Rectangle { vertical-stretch: 1; }
 
 
-        // ---- footer: banner (left, stretches) + version (right) ----
+        // ---- footer: banner (left) + working dir (middle, elide) + version (right) ----
         HorizontalLayout {
             spacing: 12px;
             if root.status != "": Banner {
@@ -1033,6 +1041,26 @@ export component AppWindow inherits Window {
             if root.status == "": Rectangle {
                 horizontal-stretch: 1;
                 height: 34px;
+            }
+            // working directory: compact, elide-truncated.
+            // Falls back to "cwd" when unset, so the footer
+            // stays balanced.
+            Text {
+                text: root.working-dir != "" ? root.working-dir : "cwd";
+                color: Theme.text;
+                font-size: 11px;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+                horizontal-alignment: end;
+                font-family: "Menlo, Consolas, DejaVu Sans Mono, monospace";
+            }
+            // separator between cwd and version
+            Text {
+                text: "·";
+                color: Theme.subtext;
+                font-size: 11px;
+                vertical-alignment: center;
             }
             Text {
                 text: "v" + root.version;

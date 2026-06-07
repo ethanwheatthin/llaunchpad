@@ -31,6 +31,10 @@ pub struct Status {
 pub struct StateSnapshot {
     /// Ollama server URL the user is currently targeting.
     pub ollama_host: String,
+    /// Working directory the user chose for the next launch. Empty
+    /// string means "inherit the launcher\'s cwd". Mirrored to
+    /// `Prefs::working_dir` for persistence.
+    pub working_dir: String,
     /// Last successful test result's local models (empty if never tested).
     pub local_models: Vec<String>,
     /// Cached local models from the most recent world refresh.
@@ -54,6 +58,7 @@ impl Default for StateSnapshot {
     fn default() -> Self {
         Self {
             ollama_host: config::Prefs::default().ollama_host,
+            working_dir: String::new(),
             local_models: Vec::new(),
             world: None,
             status: Status { message: String::new(), kind: 0 },
@@ -78,6 +83,7 @@ impl AppState {
     fn new(prefs: &Prefs) -> Self {
         let snap = StateSnapshot {
             ollama_host: prefs.ollama_host.clone(),
+            working_dir: prefs.working_dir.clone(),
             last_agent: (!prefs.agent.is_empty()).then(|| prefs.agent.clone()),
             last_model: (!prefs.model.is_empty()).then(|| prefs.model.clone()),
             last_terminal: (!prefs.terminal.is_empty()).then(|| prefs.terminal.clone()),
@@ -184,6 +190,15 @@ impl AppModel {
         self.update(|s| s.ollama_host = url.clone());
         let mut prefs = config::load();
         prefs.ollama_host = url;
+        config::save(&prefs);
+    }
+
+    /// User typed a new working directory. Persists immediately so
+    /// the next launch honors it.
+    pub fn set_working_dir(&self, dir: String) {
+        self.update(|s| s.working_dir = dir.clone());
+        let mut prefs = config::load();
+        prefs.working_dir = dir;
         config::save(&prefs);
     }
 
@@ -307,10 +322,11 @@ impl AppModel {
         agent: Agent,
         model: String,
         ollama_host: Option<String>,
+        working_dir: Option<&str>,
         terminal: crate::terminal::Terminal,
     ) -> Result<()> {
         let host = ollama_host.as_deref();
-        self.repo.launch_agent(&agent, &model, host, &terminal).await
+        self.repo.launch_agent(&agent, &model, host, working_dir, &terminal).await
     }
 
     pub async fn restore(&self, agent_token: String) -> Result<()> {
@@ -352,7 +368,7 @@ mod tests {
     struct FakeInner {
         world: Option<Result<WorldSnapshot, String>>,
         test: Option<Result<TestResult, String>>,
-        launches: Vec<(String, String, Option<String>, crate::terminal::Terminal)>,
+        launches: Vec<(String, String, Option<String>, Option<String>, crate::terminal::Terminal)>,
         restores: Vec<String>,
         restore_available: std::collections::HashMap<String, bool>,
     }
@@ -372,7 +388,7 @@ mod tests {
     }
 
     fn agent(name: &str, display: &str, is_gui: bool) -> Agent {
-        Agent { name: name.to_string(), display: display.to_string(), is_gui }
+        Agent { name: name.to_string(), display: display.to_string(), is_gui, logo: String::new() }
     }
 
     fn world(agents: Vec<Agent>, running: Vec<bool>, installed: Vec<bool>, cloud: Vec<&str>) -> WorldSnapshot {
@@ -469,12 +485,14 @@ mod tests {
             agent: &Agent,
             model: &str,
             ollama_host: Option<&str>,
+            working_dir: Option<&str>,
             terminal: &crate::terminal::Terminal,
         ) -> Result<()> {
             self.inner.lock().unwrap().launches.push((
                 agent.name.clone(),
                 model.to_string(),
                 ollama_host.map(String::from),
+                working_dir.map(String::from),
                 *terminal,
             ));
             Ok(())
@@ -495,7 +513,7 @@ mod tests {
         let _home = HomeGuard::new("llaunchpad-model-test");
         let (inner, repo) = FakeRepository::new();
         inner.lock().unwrap().world = Some(Ok(sample_world()));
-        let prefs = Prefs { agent: "claude".into(), model: "glm-4.6:cloud".into(), ollama_host: "http://x".into(), terminal: String::new() };
+        let prefs = Prefs { agent: "claude".into(), model: "glm-4.6:cloud".into(), ollama_host: "http://x".into(), terminal: String::new(), working_dir: String::new() };
         let model = AppModel::new(repo as Arc<dyn Repository>, prefs);
         assert!(!model.snapshot().first_load, "starts false");
         let r = rt();
@@ -539,6 +557,7 @@ mod tests {
             model: "gpt-oss:120b-cloud".into(),
             ollama_host: "http://localhost:11434".into(),
             terminal: String::new(),
+            working_dir: String::new(),
         };
         let model = AppModel::new(repo as Arc<dyn Repository>, prefs);
         let s = model.snapshot();
@@ -697,6 +716,7 @@ mod tests {
             model: "old-model".into(),
             ollama_host: "http://x".into(),
             terminal: String::new(),
+            working_dir: String::new(),
         });
         let model = AppModel::new(repo as Arc<dyn Repository>, crate::config::load());
         model.record_selection(Some("new-agent".into()), None);
@@ -718,6 +738,7 @@ mod tests {
             a,
             "gpt-oss:120b-cloud".into(),
             Some("http://h".into()),
+            None,
             crate::terminal::Terminal::Default,
         ))
         .unwrap();
@@ -726,6 +747,7 @@ mod tests {
         assert_eq!(calls[0].0, "claude");
         assert_eq!(calls[0].1, "gpt-oss:120b-cloud");
         assert_eq!(calls[0].2.as_deref(), Some("http://h"));
+        assert_eq!(calls[0].3, None, "working_dir should be None for this test");
     }
 
     #[test]

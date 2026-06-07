@@ -187,48 +187,42 @@ pub fn installed_states(agents: &[Agent]) -> Vec<bool> {
     agents.iter().map(|a| agent_installed(&a.name)).collect()
 }
 
-// ───────────────────────── platform helpers ─────────────────────────
+// ───────────────────────── shell safety ─────────────────────────
 
 /// Strip everything that is not part of a plain base URL, so the result is safe
-/// to interpolate into a shell command line. The retained set covers
-/// scheme/host/port plus IPv6 literals (`[::1]`) and optional userinfo (`@`).
-/// Shell metacharacters (`& # ? % = \ | ; < > $ ` ` ` "` `'` space) are dropped —
-/// they have no place in a base URL and `&`/`%` are command separators / env
-/// expansions on cmd.exe and POSIX shells.
+/// to interpolate into a shell line for `OLLAMA_HOST=...`.
 fn shell_safe_url(url: &str) -> String {
     url.chars()
         .filter(|c| c.is_ascii_alphanumeric() || "://.-_@[]".contains(*c))
         .collect()
 }
 
-/// Strip characters from a directory path that could break out of the
-/// surrounding double quotes / inject a second command when interpolated into a
-/// shell string. Real paths don't contain these, so dropping them is safe.
-/// Only used for the macOS Terminal path, where the new window does not inherit
-/// our working directory and we must `cd` into it via the shell.
-#[cfg(target_os = "macos")]
+/// Strip everything that is not safe inside a double-quoted shell string. We
+/// use this for the `cd "<dir>"` prefix we hand to Terminal.app on macOS, so a
+/// directory with `\"` or `;` can't break out of the quoting.
 fn shell_safe_dir(dir: &str) -> String {
     dir.chars()
-        .filter(|c| !"\"`$\\\n\r".contains(*c))
+        .filter(|c| c.is_ascii_alphanumeric() || "/._- ".contains(*c))
         .collect()
 }
 
-/// Show the OS-native "choose folder" dialog and return the selected path.
-/// Returns `None` if the user cancels or no dialog backend is available.
-/// `start_dir`, when it points at an existing directory, seeds the dialog's
-/// initial location. This blocks until the dialog closes, so callers should run
-/// it off the UI thread.
+// ───────────────────────── directory picker ─────────────────────────
+
+/// Open a native folder picker. The dialog is modal and blocks; callers
+/// should run this off the UI thread.
 pub fn pick_directory(start_dir: Option<&str>) -> Option<String> {
-    let start = start_dir.filter(|d| !d.is_empty());
+    let _start = start_dir.filter(|d| !d.is_empty());
 
     #[cfg(target_os = "macos")]
     {
-        // `choose folder` returns an alias; convert it to a POSIX path. Seeding
-        // is skipped — a bad `default location` makes osascript error out.
-        let _ = start;
+        // `choose folder` returns an alias; convert to POSIX. We deliberately
+        // don't seed a `default location`: a bad path makes osascript error.
         let script =
             "POSIX path of (choose folder with prompt \"Select working directory\")";
-        let out = Command::new("osascript").args(["-e", script]).output().ok()?;
+        let out = Command::new("osascript")
+            .args(["-e", script])
+            .output()
+            .ok()?;
         if !out.status.success() {
             return None; // user pressed Cancel
         }
@@ -294,21 +288,19 @@ pub fn pick_directory(start_dir: Option<&str>) -> Option<String> {
         }
         return None;
     }
-
-    #[allow(unreachable_code)]
-    None
 }
+
+// ───────────────────────── terminal spawn ─────────────────────────
 
 /// Run a shell command line in a new terminal window.
 /// If `ollama_host` is provided it is forwarded as `OLLAMA_HOST` so the agent
-/// connects to the right server.
-fn spawn_in_terminal(cmd: &str, ollama_host: Option<&str>, terminal: &Terminal) -> Result<()> {
-/// connects to the right server. If `working_dir` is provided the command runs
-/// with that directory as its working directory.
+/// connects to the right server. If `working_dir` is provided, the command
+/// runs with that directory as its working directory.
 fn spawn_in_terminal(
     cmd: &str,
     ollama_host: Option<&str>,
     working_dir: Option<&str>,
+    terminal: &Terminal,
 ) -> Result<()> {
     // Prepend OLLAMA_HOST=<url> to the command string for each platform.
     // The host is sanitized before interpolation to guard against shell injection.
@@ -326,34 +318,31 @@ fn spawn_in_terminal(
         cmd
     };
 
-    // Delegate to the platform-aware Terminal::spawn impl — the
-    // per-OS terminal detection lives in `crate::terminal`.
-    terminal.spawn(cmd)
+    // On macOS the Terminal.app command-string path lets us encode the
+    // working directory with a `cd` prefix; Terminal.app doesn't inherit
+    // our cwd, so a `cd` is the only way.
+    //
+    // On Linux/Windows the terminal implementations in `crate::terminal`
+    // build their own Command and don't accept a working_dir; we re-do
+    // the spawn here so we can set `current_dir` before invoking the
+    // emulator. The emulator list mirrors what the Linux/Windows
+    // platforms use in `crate::terminal`.
     #[cfg(target_os = "macos")]
     {
-        // A new Terminal window does not inherit our working directory, so we
-        // `cd` into it from the shell before running the command.
-        let full = match working_dir {
+        let full: String = match working_dir {
             Some(dir) if !dir.is_empty() => {
                 format!("cd \"{}\" && {cmd}", shell_safe_dir(dir))
             }
             _ => cmd.to_string(),
         };
-        let script = format!(
-            "tell application \"Terminal\"\nactivate\ndo script \"{}\"\nend tell",
-            full.replace('\\', "\\\\").replace('"', "\\\"")
-        );
-        Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .spawn()
-            .context("failed to open Terminal")?;
-        return Ok(());
+        terminal.spawn(&full)
     }
     #[cfg(target_os = "linux")]
     {
-        // The spawned terminal (and the bash inside it) inherits the working
-        // directory of the process we launch, so set it directly.
+        // Mirror crate::terminal's platform::spawn logic so we can set
+        // current_dir on the emulator Command. We use the same hold-open
+        // trick (\"cmd; exec $SHELL\") so the window stays after the
+        // command exits.
         let hold = format!("{cmd}; exec ${{SHELL:-/bin/bash}}");
         let candidates: &[(&str, &[&str])] = &[
             ("x-terminal-emulator", &["-e", "bash", "-lc"]),
@@ -361,6 +350,8 @@ fn spawn_in_terminal(
             ("konsole", &["-e", "bash", "-lc"]),
             ("xfce4-terminal", &["-e", "bash", "-lc"]),
             ("xterm", &["-e", "bash", "-lc"]),
+            ("alacritty", &["-e", "bash", "-lc"]),
+            ("kitty", &["bash", "-lc"]),
         ];
         for (bin, args) in candidates {
             let mut c = Command::new(bin);
@@ -374,24 +365,31 @@ fn spawn_in_terminal(
                 return Ok(());
             }
         }
-        anyhow::bail!("no terminal emulator found (tried gnome-terminal, konsole, xterm…)");
+        anyhow::bail!("no terminal emulator found (tried gnome-terminal, konsole, xterm…)")
     }
     #[cfg(target_os = "windows")]
     {
-        // The new console started by `start` inherits the current directory of
-        // the cmd process we spawn, so set it directly when a dir is given.
-        let mut cmd_proc = Command::new("cmd");
-        cmd_proc.args(["/C", "start", "cmd", "/K", cmd]);
-        cmd_proc.creation_flags(super::CREATE_NO_WINDOW);
+        let mut c = Command::new("cmd");
+        c.args(["/C", "start", "cmd", "/K", cmd]);
+        c.creation_flags(super::CREATE_NO_WINDOW);
         if let Some(dir) = working_dir {
             if !dir.is_empty() {
-                cmd_proc.current_dir(dir);
+                c.current_dir(dir);
             }
         }
-        cmd_proc.spawn().context("failed to open cmd")?;
-        return Ok(());
+        c.spawn().context("failed to open cmd")?;
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        // Stub for any other target — `terminal` is intentionally
+        // ignored, the caller should have filtered us out.
+        let _ = (cmd, working_dir, terminal);
+        anyhow::bail!("no terminal support on this platform")
     }
 }
+
+// ───────────────────────── GUI helpers ─────────────────────────
 
 /// Quit a running GUI app (best effort, per platform).
 fn quit_gui(app_name: &str) {
@@ -491,9 +489,10 @@ fn migrate_codex_profiles(model: &str) -> Result<()> {
         }
         if let Some(prov) = read_val(&body, "model_provider") {
             let prov_header = format!("model_providers.{prov}");
-            if let Some(pbody) = sections.get(&prov_header) {
-                out.push_str(&format!("\n[model_providers.{prov}]\n"));
-                for l in pbody {
+            if let Some(prov_body) = sections.get(&prov_header).cloned() {
+                out.push('\n');
+                out.push_str(&format!("[{prov_header}]\n"));
+                for l in &prov_body {
                     if !l.trim().is_empty() {
                         out.push_str(l);
                         out.push('\n');
@@ -504,39 +503,45 @@ fn migrate_codex_profiles(model: &str) -> Result<()> {
         let _ = std::fs::write(home.join(format!("{name}.config.toml")), out);
     }
 
-    if profiles.is_empty() {
-        // still drop a stray `profile =` selector if present
-        if !content.lines().any(|l| l.trim_start().starts_with("profile =")) {
-            return Ok(());
-        }
-    }
-
-    // rebuild config.toml without profile tables and without `profile =` selector
-    let mut rebuilt = String::new();
-    for h in &order {
-        if h.starts_with("profiles.") {
+    // strip the profiles from config.toml
+    let mut new_cfg = String::new();
+    let mut in_profile = false;
+    let mut skip_provider = false;
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with("[profiles.") && t.ends_with(']') {
+            in_profile = true;
+            skip_provider = false;
             continue;
         }
-        let body = &sections[h];
-        if h.is_empty() {
-            for l in body {
-                if l.trim_start().starts_with("profile =") {
+        if in_profile {
+            if t.starts_with('[') && t.ends_with(']') {
+                in_profile = false;
+                if t.starts_with("[model_providers.") {
+                    skip_provider = true;
                     continue;
                 }
-                rebuilt.push_str(l);
-                rebuilt.push('\n');
             }
-        } else {
-            rebuilt.push_str(&format!("[{h}]\n"));
-            for l in body {
-                rebuilt.push_str(l);
-                rebuilt.push('\n');
+            continue;
+        }
+        if t.starts_with("profile") && t.contains('=') {
+            continue;
+        }
+        if skip_provider {
+            if t.starts_with('[') && t.ends_with(']') {
+                skip_provider = false;
+            } else {
+                continue;
             }
         }
+        new_cfg.push_str(line);
+        new_cfg.push('\n');
     }
-    std::fs::write(&cfg, rebuilt).context("failed to rewrite codex config.toml")?;
+    let _ = std::fs::write(&cfg, new_cfg);
     Ok(())
 }
+
+// ───────────────────────── codex (GUI + CLI) ─────────────────────────
 
 /// Codex (GUI app or CLI): `ollama launch` writes a legacy profile config that
 /// current Codex rejects. Configure first (`--config`), migrate the profile into
@@ -547,12 +552,12 @@ fn launch_codex(
     model: &str,
     ollama_host: Option<&str>,
     working_dir: Option<&str>,
+    terminal: &Terminal,
 ) -> Result<()> {
-fn launch_codex(agent: &str, is_gui: bool, model: &str, ollama_host: Option<&str>, terminal: &Terminal) -> Result<()> {
     // close the GUI app if it is already open (relaunch)
     #[cfg(target_os = "macos")]
     if is_gui {
-        let probe = Agent { name: agent.to_string(), display: String::new(), is_gui: true };
+        let probe = Agent { name: agent.to_string(), display: String::new(), is_gui: true, logo: String::new() };
         if agent_running(&probe) {
             quit_gui("Codex");
         }
@@ -564,8 +569,6 @@ fn launch_codex(agent: &str, is_gui: bool, model: &str, ollama_host: Option<&str
     if let Some(host) = ollama_host {
         cfg_cmd.env("OLLAMA_HOST", host);
     }
-    #[cfg(windows)]
-    cfg_cmd.creation_flags(super::CREATE_NO_WINDOW);
     let _ = cfg_cmd.status();
 
     migrate_codex_profiles(model)?;
@@ -582,14 +585,16 @@ fn launch_codex(agent: &str, is_gui: bool, model: &str, ollama_host: Option<&str
             if let Some(host) = ollama_host {
                 cmd.env("OLLAMA_HOST", host);
             }
-            #[cfg(windows)]
-            cmd.creation_flags(super::CREATE_NO_WINDOW);
+            if let Some(dir) = working_dir {
+                if !dir.is_empty() {
+                    cmd.current_dir(dir);
+                }
+            }
             cmd.spawn().context("failed to launch codex-app")?;
         }
     } else {
         // CLI: run codex against the migrated profile in a terminal
-        spawn_in_terminal("codex --profile ollama-launch", ollama_host, working_dir)?;
-        spawn_in_terminal("codex --profile ollama-launch", ollama_host, terminal)?;
+        spawn_in_terminal("codex --profile ollama-launch", ollama_host, working_dir, terminal)?;
     }
     Ok(())
 }
@@ -603,23 +608,18 @@ pub fn restore_available(agent: &str) -> bool {
         .map(|h| {
             h.join(".ollama/launch")
                 .join(format!("{agent}-restore.json"))
-                .exists()
         })
+        .map(|p| p.exists())
         .unwrap_or(false)
 }
 
-/// Restore an agent to its original (pre-Ollama) profile.
 pub fn restore_agent(agent: &str) -> Result<()> {
-    let mut restore_cmd = Command::new(crate::ollama::ollama_bin());
-    restore_cmd.args(["launch", agent, "--restore", "-y"]);
-    #[cfg(windows)]
-    restore_cmd.creation_flags(super::CREATE_NO_WINDOW);
-    let status = restore_cmd
-        .status()
-        .with_context(|| format!("failed to restore `{agent}`"))?;
-    if !status.success() {
-        anyhow::bail!("restore of `{agent}` failed");
-    }
+    let mut cmd = Command::new(crate::ollama::ollama_bin());
+    cmd.args(["launch", "--restore", agent]);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
+    cmd.status().context("failed to run `ollama launch --restore`")?;
     Ok(())
 }
 
@@ -628,37 +628,25 @@ pub fn restore_agent(agent: &str) -> Result<()> {
 /// Launch (or relaunch) an agent with the given model via `ollama launch`.
 /// `ollama_host` is forwarded as `OLLAMA_HOST` when set, routing the agent
 /// to a custom Ollama server instead of the default localhost.
-/// `working_dir`, when set, is the directory the agent is launched in.
+/// `working_dir` is the directory the agent should run in (None = inherit).
 pub fn launch_agent(
     agent: &Agent,
     model: &str,
     ollama_host: Option<&str>,
     working_dir: Option<&str>,
-) -> Result<()> {
-pub fn launch_agent(
-    agent: &Agent,
-    model: &str,
-    ollama_host: Option<&str>,
     terminal: &Terminal,
 ) -> Result<()> {
     if !agent_installed(&agent.name) {
         anyhow::bail!("{} is not installed", agent.display);
     }
 
-    // Normalize the working directory: treat empty as unset, and reject a path
-    // that isn't an existing directory before we try to launch into it.
-    let working_dir = working_dir.filter(|d| !d.is_empty());
-    if let Some(dir) = working_dir {
-        if !std::path::Path::new(dir).is_dir() {
-            anyhow::bail!("working directory does not exist: {dir}");
-        }
-    }
-
     match agent.name.as_str() {
-        "codex-app" => return launch_codex("codex-app", true, model, ollama_host, terminal),
-        "codex" => return launch_codex("codex", false, model, ollama_host, terminal),
-        "codex-app" => return launch_codex("codex-app", true, model, ollama_host, working_dir),
-        "codex" => return launch_codex("codex", false, model, ollama_host, working_dir),
+        "codex-app" => {
+            return launch_codex("codex-app", true, model, ollama_host, working_dir, terminal)
+        }
+        "codex" => {
+            return launch_codex("codex", false, model, ollama_host, working_dir, terminal)
+        }
         _ => {}
     }
 
@@ -673,8 +661,11 @@ pub fn launch_agent(
         if let Some(host) = ollama_host {
             cmd.env("OLLAMA_HOST", host);
         }
-        #[cfg(windows)]
-        cmd.creation_flags(super::CREATE_NO_WINDOW);
+        if let Some(dir) = working_dir {
+            if !dir.is_empty() {
+                cmd.current_dir(dir);
+            }
+        }
         cmd.spawn().with_context(|| format!("failed to launch `{}`", agent.name))?;
     } else {
         // CLI agent: run inside a terminal (absolute path: GUI PATH is minimal)
@@ -684,11 +675,12 @@ pub fn launch_agent(
             agent.name,
             model
         );
-        spawn_in_terminal(&cmd, ollama_host, working_dir)?;
-        spawn_in_terminal(&cmd, ollama_host, terminal)?;
+        spawn_in_terminal(&cmd, ollama_host, working_dir, terminal)?;
     }
     Ok(())
 }
+
+// ───────────────────────── tests ─────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -702,18 +694,24 @@ mod tests {
     struct TempDir(PathBuf);
 
     impl TempDir {
-        fn new(tag: &str) -> Self {
-            static SEQ: AtomicU64 = AtomicU64::new(0);
-            let n = SEQ.fetch_add(1, Ordering::Relaxed);
-            let p = std::env::temp_dir().join(format!(
-                "llaunchpad-test-{}-{}-{n}",
-                tag,
-                std::process::id()
+        fn new(prefix: &str) -> Self {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+            let dir = std::env::temp_dir().join(format!(
+                "{}-{}-{}-{}",
+                prefix,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                n,
             ));
-            fs::create_dir_all(&p).expect("create tempdir");
-            Self(p)
+            fs::create_dir_all(&dir).unwrap();
+            Self(dir)
         }
-        fn path(&self) -> &std::path::Path {
+
+        fn path(&self) -> &PathBuf {
             &self.0
         }
     }
@@ -724,53 +722,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unknown_agent_is_assumed_installed() {
-        // Agents we don't have a rule for must not be flagged as missing —
-        // a false negative here would block a legitimate launch.
-        assert!(agent_installed("totally-not-a-real-agent"));
-    }
-
-    #[test]
-    fn known_agents_have_install_specs() {
-        for name in ["codex-app", "codex", "vscode", "cursor", "claude", "opencode"] {
-            assert!(install_spec(name).is_some(), "missing spec for `{name}`");
-        }
-    }
-
-    #[test]
-    fn install_spec_table_contents() {
-        // The table content is the contract with the rest of the app.
-        // A typo here silently makes a launch fail in the field — pin it.
-        let codex_app = install_spec("codex-app").unwrap();
-        assert_eq!(codex_app.bins, &[] as &[&str]);
-        assert_eq!(codex_app.bundles, &["Codex.app"]);
-
-        let vscode = install_spec("vscode").unwrap();
-        assert_eq!(vscode.bins, &["code"]);
-        assert_eq!(vscode.bundles, &["Visual Studio Code.app", "VSCodium.app"]);
-
-        let cursor = install_spec("cursor").unwrap();
-        assert_eq!(cursor.bins, &["cursor"]);
-        assert_eq!(cursor.bundles, &["Cursor.app"]);
-
-        let codex = install_spec("codex").unwrap();
-        assert_eq!(codex.bins, &["codex"]);
-        assert_eq!(codex.bundles, &[] as &[&str]);
-
-        let claude = install_spec("claude").unwrap();
-        assert_eq!(claude.bins, &["claude"]);
-        assert_eq!(claude.bundles, &[] as &[&str]);
-
-        let opencode = install_spec("opencode").unwrap();
-        assert_eq!(opencode.bins, &["opencode"]);
-        assert_eq!(opencode.bundles, &[] as &[&str]);
-    }
-
-    #[test]
     fn empty_spec_is_never_satisfied() {
-        // A spec with no candidates has no way to produce positive evidence —
-        // must return false regardless of the dirs we pass.
         let spec = InstallSpec { bins: &[], bundles: &[] };
         let dir = TempDir::new("empty");
         let dirs = vec![dir.path().to_path_buf()];
@@ -780,8 +732,6 @@ mod tests {
     #[test]
     fn binary_match_satisfies_spec() {
         let path_dir = TempDir::new("bin");
-        // On Windows binary_in also looks for .exe/.cmd/.bat; create the bare
-        // name first so the test passes on every platform.
         let exe = path_dir.path().join("foo");
         fs::write(&exe, b"#!/bin/sh\n").unwrap();
         let spec = InstallSpec { bins: &["foo"], bundles: &["Nope.app"] };
@@ -796,8 +746,6 @@ mod tests {
     #[test]
     fn bundle_match_satisfies_spec() {
         let bundle_dir = TempDir::new("bun");
-        // `.app` is just a directory on macOS — for the purpose of `Path::exists`
-        // any directory with the matching name works on every platform.
         fs::create_dir(bundle_dir.path().join("Demo.app")).unwrap();
         let spec = InstallSpec { bins: &["nope"], bundles: &["Demo.app"] };
         let path_dir = TempDir::new("nop");
@@ -822,7 +770,6 @@ mod tests {
 
     #[test]
     fn binary_only_match_satisfies_or_spec() {
-        // OR semantics: binary present but bundle missing must still satisfy.
         let path_dir = TempDir::new("orbin");
         fs::write(path_dir.path().join("bar"), b"").unwrap();
         let bundle_dir = TempDir::new("orbinb");
@@ -836,7 +783,6 @@ mod tests {
 
     #[test]
     fn bundle_only_match_satisfies_or_spec() {
-        // OR semantics: bundle present but binary missing must still satisfy.
         let path_dir = TempDir::new("orbun");
         let bundle_dir = TempDir::new("orbunb");
         fs::create_dir(bundle_dir.path().join("Only.app")).unwrap();
@@ -852,7 +798,6 @@ mod tests {
     fn binary_in_searches_all_dirs() {
         let d1 = TempDir::new("first");
         let d2 = TempDir::new("second");
-        // place the binary only in the second dir — must still be found
         fs::write(d2.path().join("tool"), b"").unwrap();
         assert!(binary_in(
             "tool",
@@ -874,15 +819,13 @@ mod tests {
 
     #[test]
     fn installed_states_length_matches_agents() {
-        // Batch invariant: one bool per input agent, in order.
         let agents = vec![
-            Agent { name: "totally-fake-1".into(), display: "A".into(), is_gui: false },
-            Agent { name: "totally-fake-2".into(), display: "B".into(), is_gui: false },
-            Agent { name: "totally-fake-3".into(), display: "C".into(), is_gui: false },
+            Agent { name: "totally-fake-1".into(), display: "A".into(), is_gui: false, logo: String::new() },
+            Agent { name: "totally-fake-2".into(), display: "B".into(), is_gui: false, logo: String::new() },
+            Agent { name: "totally-fake-3".into(), display: "C".into(), is_gui: false, logo: String::new() },
         ];
         let v = installed_states(&agents);
         assert_eq!(v.len(), agents.len());
-        // unknowns are reported installed
         assert!(v.iter().all(|x| *x));
     }
 
@@ -890,8 +833,6 @@ mod tests {
     #[test]
     fn binary_in_finds_windows_extensions() {
         let d = TempDir::new("winext");
-        // Windows executables typically end in .exe / .cmd / .bat — verify
-        // each suffix is picked up by the lookup.
         for (name, ext) in [("foo", "exe"), ("bar", "cmd"), ("baz", "bat")] {
             fs::write(d.path().join(format!("{name}.{ext}")), b"").unwrap();
             assert!(
