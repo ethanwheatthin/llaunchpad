@@ -212,6 +212,92 @@ fn shell_safe_dir(dir: &str) -> String {
         .collect()
 }
 
+/// Show the OS-native "choose folder" dialog and return the selected path.
+/// Returns `None` if the user cancels or no dialog backend is available.
+/// `start_dir`, when it points at an existing directory, seeds the dialog's
+/// initial location. This blocks until the dialog closes, so callers should run
+/// it off the UI thread.
+pub fn pick_directory(start_dir: Option<&str>) -> Option<String> {
+    let start = start_dir.filter(|d| !d.is_empty());
+
+    #[cfg(target_os = "macos")]
+    {
+        // `choose folder` returns an alias; convert it to a POSIX path. Seeding
+        // is skipped — a bad `default location` makes osascript error out.
+        let _ = start;
+        let script =
+            "POSIX path of (choose folder with prompt \"Select working directory\")";
+        let out = Command::new("osascript").args(["-e", script]).output().ok()?;
+        if !out.status.success() {
+            return None; // user pressed Cancel
+        }
+        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        return if p.is_empty() { None } else { Some(p) };
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Drive the Win32 folder browser through PowerShell. CREATE_NO_WINDOW
+        // keeps a console from flashing up. The seed path is single-quoted with
+        // `'` doubled so a path can't break out of the string literal.
+        let seed = match start {
+            Some(d) => format!(
+                "$s = '{}'; if (Test-Path $s) {{ $dlg.SelectedPath = $s }}\n",
+                d.replace('\'', "''")
+            ),
+            None => String::new(),
+        };
+        let ps = format!(
+            "Add-Type -AssemblyName System.Windows.Forms | Out-Null\n\
+             $dlg = New-Object System.Windows.Forms.FolderBrowserDialog\n\
+             $dlg.Description = 'Select working directory'\n\
+             {seed}\
+             if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ \
+             [Console]::Out.Write($dlg.SelectedPath) }}"
+        );
+        let mut c = Command::new("powershell");
+        c.args(["-NoProfile", "-STA", "-NonInteractive", "-Command", &ps]);
+        c.creation_flags(super::CREATE_NO_WINDOW);
+        let out = c.output().ok()?;
+        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        return if p.is_empty() { None } else { Some(p) };
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Try zenity, then kdialog. zenity seeds via --filename (trailing slash
+        // tells it the path is a directory).
+        let mut zen = Command::new("zenity");
+        zen.args(["--file-selection", "--directory", "--title=Select working directory"]);
+        if let Some(d) = start {
+            zen.arg(format!("--filename={}/", d.trim_end_matches('/')));
+        }
+        if let Ok(out) = zen.output() {
+            if out.status.success() {
+                let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !p.is_empty() {
+                    return Some(p);
+                }
+            }
+        }
+        let mut kde = Command::new("kdialog");
+        kde.arg("--getexistingdirectory");
+        kde.arg(start.unwrap_or("."));
+        if let Ok(out) = kde.output() {
+            if out.status.success() {
+                let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !p.is_empty() {
+                    return Some(p);
+                }
+            }
+        }
+        return None;
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
 /// Run a shell command line in a new terminal window.
 /// If `ollama_host` is provided it is forwarded as `OLLAMA_HOST` so the agent
 /// connects to the right server. If `working_dir` is provided the command runs
@@ -286,9 +372,16 @@ fn spawn_in_terminal(
     }
     #[cfg(target_os = "windows")]
     {
+        // The new console started by `start` inherits the current directory of
+        // the cmd process we spawn, so set it directly when a dir is given.
         let mut cmd_proc = Command::new("cmd");
         cmd_proc.args(["/C", "start", "cmd", "/K", cmd]);
         cmd_proc.creation_flags(super::CREATE_NO_WINDOW);
+        if let Some(dir) = working_dir {
+            if !dir.is_empty() {
+                cmd_proc.current_dir(dir);
+            }
+        }
         cmd_proc.spawn().context("failed to open cmd")?;
         return Ok(());
     }

@@ -529,6 +529,7 @@ export component AppWindow inherits Window {
     callback restore(int /*agent index*/);
     callback refresh();
     callback test-connection(string /*ollama host url*/);
+    callback pick-directory();
     callback dismiss();
 
     VerticalBox {
@@ -610,8 +611,13 @@ export component AppWindow inherits Window {
             }
             dir-input := ThemedInput {
                 text <=> root.working-dir;
-                placeholder-text: "Working directory (optional — defaults to launcher's)";
+                placeholder-text: "Working directory";
                 horizontal-stretch: 1;
+            }
+            Btn {
+                text: "Browse…";
+                min-width: 90px;
+                clicked => { root.pick-directory(); }
             }
         }
 

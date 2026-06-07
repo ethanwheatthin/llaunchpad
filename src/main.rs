@@ -7,7 +7,7 @@ slint::include_modules!();
 
 use ollama::{
     installed_states, launch_agent, list_agents, list_cloud_models, list_local_models,
-    restore_agent, restore_available, running_states, test_connection, Agent,
+    pick_directory, restore_agent, restore_available, running_states, test_connection, Agent,
 };
 use slint::{Model, ModelRc, SharedString, VecModel};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -361,6 +361,30 @@ fn main() -> anyhow::Result<()> {
                         ui.set_status_kind(kind);
                     }
                 });
+            });
+        });
+    }
+
+    // ---- directory picker ----
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_pick_directory(move || {
+            let ui_weak = ui_weak.clone();
+            // seed the dialog at the current value so re-browsing starts there
+            let start = ui_weak
+                .upgrade()
+                .map(|ui| ui.get_working_dir().to_string())
+                .unwrap_or_default();
+            // the native dialog blocks until dismissed — run it off the UI thread
+            std::thread::spawn(move || {
+                let start_opt = if start.is_empty() { None } else { Some(start.as_str()) };
+                if let Some(dir) = pick_directory(start_opt) {
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = ui_weak.upgrade() {
+                            ui.set_working_dir(dir.into());
+                        }
+                    });
+                }
             });
         });
     }
