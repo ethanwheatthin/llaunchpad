@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-07
+
+### Added
+- **Working directory** — a new *Directory* field lets you launch (or relaunch)
+  an agent in a chosen folder instead of the launcher's own working directory.
+  The value is persisted between runs and validated before launch (a missing
+  path fails with a clear error). GUI agents inherit it via the spawned
+  process's working directory; CLI agents open their terminal there.
+- **Browse… picker** — a native "choose folder" dialog next to the Directory
+  field (FolderBrowserDialog on Windows, `choose folder` on macOS,
+  zenity/kdialog on Linux), seeded at the current value.
+
+### Changed
+- The app now sets its window/taskbar icon (`icon-header.png`) so the running
+  app shows the Llaunchpad logo instead of a default icon.
+
 ## [0.5.0] - 2026-06-01
 
 ### Added

@@ -7,12 +7,62 @@ slint::include_modules!();
 
 use ollama::{
     installed_states, launch_agent, list_agents, list_cloud_models, list_local_models,
-    restore_agent, restore_available, running_states, test_connection, Agent,
+    pick_directory, restore_agent, restore_available, running_states, test_connection, Agent,
 };
 use slint::{Model, ModelRc, SharedString, VecModel};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// Map a cloud model name to its provider slug (matches ProviderLogo in app.slint).
+fn provider_for_model(name: &str) -> &'static str {
+    let n = name.split(':').next().unwrap_or(name);
+    // OpenAI skipped "o2"; add it here if they ever release one.
+    if n.starts_with("gpt-") || n.starts_with("o1") || n.starts_with("o2") || n.starts_with("o3") || n.starts_with("o4") {
+        "openai"
+    } else if n.starts_with("gemini") {
+        "gemini"
+    } else if n.starts_with("gemma") {
+        "gemma"
+    } else if n.starts_with("mistral") || n.starts_with("ministral") || n.starts_with("devstral") {
+        "mistral"
+    } else if n.starts_with("deepseek") {
+        "deepseek"
+    } else if n.starts_with("qwen") {
+        "qwen"
+    } else if n.starts_with("glm") {
+        "zhipu"
+    } else if n.starts_with("kimi") || n.starts_with("moonshot") {
+        "moonshot"
+    } else if n.starts_with("nemotron") {
+        "nvidia"
+    } else if n.starts_with("minimax") {
+        "minimax"
+    } else {
+        "ollama"
+    }
+}
+
+/// Map an agent launch token to its logo key (matches AgentBadge in app.slint).
+/// Returns "" for unknown agents so the initials badge is used as fallback.
+fn logo_for_agent(name: &str) -> &'static str {
+    match name {
+        "claude" | "claude-code"                        => "claude-code",
+        "codex-app" | "codex-desktop" | "codex-gui"
+        | "codex"                                       => "codex",
+        "opencode"                                      => "opencode",
+        "hermes" | "hermes-agent"                       => "hermes",
+        "openclaw"                                      => "openclaw",
+        "cursor"                                        => "cursor",
+        "windsurf"                                      => "windsurf",
+        "copilot" | "github-copilot"                    => "copilot",
+        "cline"                                         => "cline",
+        "amp"                                           => "amp",
+        "goose"                                         => "goose",
+        "vscode" | "code"                               => "vscode",
+        _                                               => "",
+    }
+}
 
 /// Up to two uppercase initials from the agent label.
 fn initials(display: &str) -> String {
@@ -52,6 +102,7 @@ fn make_agent_items(agents: &[Agent], running: &[bool], installed: &[bool]) -> V
             restorable: restore_available(&a.name),
             initials: initials(&a.display).into(),
             color_index: color_index(&a.name),
+            logo: logo_for_agent(&a.name).into(),
         })
         .collect()
 }
@@ -61,11 +112,19 @@ fn make_agent_items(agents: &[Agent], running: &[bool], installed: &[bool]) -> V
 fn make_model_items(local: &[String], cloud: &[String]) -> Vec<ModelItem> {
     let mut items: Vec<ModelItem> = local
         .iter()
-        .map(|n| ModelItem { name: n.as_str().into(), is_local: true })
+        .map(|n| ModelItem {
+            name: n.as_str().into(),
+            is_local: true,
+            provider: "ollama".into(),
+        })
         .collect();
     for n in cloud {
         if !local.iter().any(|l| l == n) {
-            items.push(ModelItem { name: n.as_str().into(), is_local: false });
+            items.push(ModelItem {
+                name: n.as_str().into(),
+                is_local: false,
+                provider: provider_for_model(n).into(),
+            });
         }
     }
     items
@@ -138,8 +197,9 @@ fn main() -> anyhow::Result<()> {
     let test_gen: Arc<std::sync::atomic::AtomicU64> =
         Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-    // restore ollama_host from prefs
+    // restore ollama_host + working_dir from prefs
     ui.set_ollama_host(prefs.ollama_host.clone().into());
+    ui.set_working_dir(prefs.working_dir.clone().into());
 
     // ---- dismiss banner ----
     {
@@ -242,22 +302,29 @@ fn main() -> anyhow::Result<()> {
         ui.on_launch(move |idx, model| {
             let agent = store.lock().unwrap().get(idx as usize).cloned();
             let model = model.to_string();
-            let host = ui_weak
+            let (host, working_dir) = ui_weak
                 .upgrade()
-                .map(|ui| ui.get_ollama_host().to_string())
+                .map(|ui| {
+                    (
+                        ui.get_ollama_host().to_string(),
+                        ui.get_working_dir().to_string(),
+                    )
+                })
                 .unwrap_or_default();
             if let Some(a) = &agent {
                 config::save(&config::Prefs {
                     agent: a.name.clone(),
                     model: model.clone(),
                     ollama_host: host.clone(),
+                    working_dir: working_dir.clone(),
                 });
             }
             let ui_weak = ui_weak.clone();
             std::thread::spawn(move || {
                 let host_opt = if host.is_empty() { None } else { Some(host.as_str()) };
+                let dir_opt = if working_dir.is_empty() { None } else { Some(working_dir.as_str()) };
                 let (msg, kind) = match agent {
-                    Some(a) => match launch_agent(&a, &model, host_opt) {
+                    Some(a) => match launch_agent(&a, &model, host_opt, dir_opt) {
                         Ok(()) => (format!("✓ {} launched · {}", a.display, model), 1),
                         Err(e) => (format!("✗ {e}"), 2),
                     },
@@ -298,6 +365,30 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
+    // ---- directory picker ----
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_pick_directory(move || {
+            let ui_weak = ui_weak.clone();
+            // seed the dialog at the current value so re-browsing starts there
+            let start = ui_weak
+                .upgrade()
+                .map(|ui| ui.get_working_dir().to_string())
+                .unwrap_or_default();
+            // the native dialog blocks until dismissed — run it off the UI thread
+            std::thread::spawn(move || {
+                let start_opt = if start.is_empty() { None } else { Some(start.as_str()) };
+                if let Some(dir) = pick_directory(start_opt) {
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = ui_weak.upgrade() {
+                            ui.set_working_dir(dir.into());
+                        }
+                    });
+                }
+            });
+        });
+    }
+
     // ---- shared refresh routine ----
     // last_lists: (agent_signatures, cloud_model_names) — only push UI updates on change
     let do_refresh: Arc<dyn Fn() + Send + Sync> = {
@@ -326,6 +417,12 @@ fn main() -> anyhow::Result<()> {
                 }
                 match fetch_all().await {
                     Ok((agents, running, installed, cloud_names)) => {
+                        // sort: agents with logos first, no-logo agents last (stable)
+                        let mut order: Vec<usize> = (0..agents.len()).collect();
+                        order.sort_by_key(|&i| if logo_for_agent(&agents[i].name).is_empty() { 1i32 } else { 0i32 });
+                        let agents: Vec<Agent> = order.iter().map(|&i| agents[i].clone()).collect();
+                        let running: Vec<bool> = order.iter().map(|&i| running[i]).collect();
+                        let installed: Vec<bool> = order.iter().map(|&i| installed[i]).collect();
                         *store.lock().unwrap() = agents.clone();
                         let items = make_agent_items(&agents, &running, &installed);
 
