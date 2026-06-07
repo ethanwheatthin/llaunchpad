@@ -3,6 +3,11 @@ pub mod models;
 pub mod launch;
 
 pub use agents::{list_agents, Agent};
+pub use launch::{
+    installed_states, launch_agent, pick_directory, restore_agent, restore_available,
+    running_states,
+};
+pub use models::{list_cloud_models, list_local_models, test_connection};
 pub use launch::{installed_states, launch_agent, restore_agent, restore_available, running_states};
 pub use models::{list_cloud_models, list_local_models, test_connection, Model};
 
@@ -58,8 +63,16 @@ fn resolve_ollama() -> String {
 }
 
 #[cfg(windows)]
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+#[cfg(windows)]
 fn resolve_ollama() -> String {
-    if let Ok(out) = std::process::Command::new("where").arg("ollama").output() {
+    use std::os::windows::process::CommandExt;
+    if let Ok(out) = std::process::Command::new("where")
+        .arg("ollama")
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
         let s = String::from_utf8_lossy(&out.stdout);
         if let Some(first) = s.lines().next() {
             let first = first.trim();

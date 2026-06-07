@@ -7,13 +7,15 @@ export struct AgentItem {
     running: bool,
     installed: bool,       // app/CLI detected on this machine
     restorable: bool,      // has an ollama restore backup
-    initials: string,      // badge text (e.g. "CA")
+    initials: string,      // badge text (e.g. "CA") — shown when no logo
     color-index: int,      // slot into Theme.palette
+    logo: string,          // logo key e.g. "claude-code", "" = fall back to initials
 }
 
 export struct ModelItem {
     name: string,          // model name passed to ollama launch
     is-local: bool,        // true = pulled from local/remote Ollama server
+    provider: string,      // provider slug e.g. "openai", "gemini", "ollama"
 }
 
 export struct TerminalItem {
@@ -77,14 +79,18 @@ component Icon {
 
 
 // ---- colored initials badge ----
+// ---- agent badge: logo PNG if known, otherwise colored initials ----
 component AgentBadge inherits Rectangle {
     in property <string> label;
     in property <int> color-index;
+    in property <string> logo;
     width: 26px;
     height: 26px;
     border-radius: 7px;
-    background: Theme.tint(color-index);
-    Text {
+    clip: true;
+    background: logo != "" ? #ffffff : Theme.tint(color-index);
+
+    if logo == "" : Text {
         text: label;
         color: #11111b;
         font-size: 11px;
@@ -92,6 +98,19 @@ component AgentBadge inherits Rectangle {
         horizontal-alignment: center;
         vertical-alignment: center;
     }
+
+    if logo == "claude-code" : Image { width: 26px; height: 26px; source: @image-url("../assets/logos/claude-code.png"); image-fit: contain; }
+    if logo == "codex"       : Image { width: 26px; height: 26px; source: @image-url("../assets/logos/codex.png");       image-fit: contain; }
+    if logo == "opencode"    : Image { width: 26px; height: 26px; source: @image-url("../assets/logos/opencode.png");    image-fit: contain; }
+    if logo == "hermes"      : Image { width: 26px; height: 26px; source: @image-url("../assets/logos/hermes.png");      image-fit: contain; }
+    if logo == "openclaw"    : Image { width: 26px; height: 26px; source: @image-url("../assets/logos/openclaw.png");    image-fit: contain; }
+    if logo == "cursor"      : Image { width: 26px; height: 26px; source: @image-url("../assets/logos/cursor.png");      image-fit: contain; }
+    if logo == "windsurf"    : Image { width: 26px; height: 26px; source: @image-url("../assets/logos/windsurf.png");    image-fit: contain; }
+    if logo == "copilot"     : Image { width: 26px; height: 26px; source: @image-url("../assets/logos/copilot.png");     image-fit: contain; }
+    if logo == "cline"       : Image { width: 26px; height: 26px; source: @image-url("../assets/logos/cline.png");       image-fit: contain; }
+    if logo == "amp"         : Image { width: 26px; height: 26px; source: @image-url("../assets/logos/amp.png");         image-fit: contain; }
+    if logo == "goose"       : Image { width: 26px; height: 26px; source: @image-url("../assets/logos/goose.png");       image-fit: contain; }
+    if logo == "vscode"      : Image { width: 26px; height: 26px; source: @image-url("../assets/logos/vscode.png");      image-fit: contain; }
 }
 
 // ---- small pill badge shown next to local model names ----
@@ -233,7 +252,7 @@ component AgentSelect {
 
     property <AgentItem> cur: (current-index >= 0 && current-index < items.length)
         ? items[current-index]
-        : { display: "Select agent", initials: "?", color-index: 0, installed: true };
+        : { display: "Select agent", initials: "?", color-index: 0, installed: true, logo: "" };
 
     field := Rectangle {
         background: Theme.card;
@@ -248,6 +267,7 @@ component AgentSelect {
                 y: (parent.height - self.height) / 2;
                 label: cur.initials;
                 color-index: cur.color-index;
+                logo: cur.logo;
                 opacity: cur.installed ? 1.0 : 0.55;
             }
             Text {
@@ -310,6 +330,7 @@ component AgentSelect {
                                 y: (parent.height - self.height) / 2;
                                 label: it.initials;
                                 color-index: it.color-index;
+                                logo: it.logo;
                                 opacity: it.installed ? 1.0 : 0.55;
                             }
                             Text {
@@ -343,7 +364,26 @@ component AgentSelect {
     }
 }
 
-// ---- model dropdown — shows a teal "local" badge for server models ----
+// ---- provider logo badge ----
+component ProviderLogo inherits Rectangle {
+    in property <string> provider;
+    width: 22px;
+    height: 22px;
+
+    if provider == "openai"   : Image { width: 22px; height: 22px; source: @image-url("../assets/logos/openai.png");   image-fit: contain; }
+    if provider == "gemini"   : Image { width: 22px; height: 22px; source: @image-url("../assets/logos/gemini.png");   image-fit: contain; }
+    if provider == "gemma"    : Image { width: 22px; height: 22px; source: @image-url("../assets/logos/gemma.png");    image-fit: contain; }
+    if provider == "mistral"  : Image { width: 22px; height: 22px; source: @image-url("../assets/logos/mistral.png");  image-fit: contain; }
+    if provider == "deepseek" : Image { width: 22px; height: 22px; source: @image-url("../assets/logos/deepseek.png"); image-fit: contain; }
+    if provider == "qwen"     : Image { width: 22px; height: 22px; source: @image-url("../assets/logos/qwen.png");     image-fit: contain; }
+    if provider == "zhipu"    : Image { width: 22px; height: 22px; source: @image-url("../assets/logos/zhipu.png");    image-fit: contain; }
+    if provider == "moonshot" : Image { width: 22px; height: 22px; source: @image-url("../assets/logos/moonshot.png"); image-fit: contain; }
+    if provider == "nvidia"   : Image { width: 22px; height: 22px; source: @image-url("../assets/logos/nvidia.png");   image-fit: contain; }
+    if provider == "minimax"  : Image { width: 22px; height: 22px; source: @image-url("../assets/logos/minimax.png");  image-fit: contain; }
+    if provider == "ollama"   : Image { width: 22px; height: 22px; source: @image-url("../assets/logos/ollama.png");   image-fit: contain; }
+}
+
+// ---- model dropdown — shows provider logo + teal "local" badge for server models ----
 component ModelSelect {
     in property <[ModelItem]> items;
     in-out property <int> current-index;
@@ -355,7 +395,7 @@ component ModelSelect {
 
     property <ModelItem> cur: (current-index >= 0 && current-index < items.length)
         ? items[current-index]
-        : { name: "Select model", is-local: false };
+        : { name: "Select model", is-local: false, provider: "ollama" };
 
     field := Rectangle {
         background: Theme.card;
@@ -364,20 +404,16 @@ component ModelSelect {
         border-color: Theme.accent.with-alpha(0.5);
         opacity: enabled ? 1.0 : 0.5;
         HorizontalLayout {
-            padding-left: 12px;
+            padding-left: 8px;
             padding-right: 12px;
-            spacing: 6px;
-            // teal dot shown for the selected item when it's local
-            Rectangle {
-                width: cur.is-local ? 7px : 0px;
-                height: 7px;
-                border-radius: 4px;
+            spacing: 8px;
+            ProviderLogo {
                 y: (parent.height - self.height) / 2;
-                background: cur.is-local ? Theme.local : transparent;
+                provider: cur.provider;
             }
             Text {
                 text: cur.name;
-                color: Theme.text;
+                color: cur.is-local ? Theme.local : Theme.text;
                 font-size: 14px;
                 vertical-alignment: center;
             }
@@ -423,10 +459,14 @@ component ModelSelect {
                             ? Theme.accent.with-alpha(0.22)
                             : (row-ta.has-hover ? Theme.card : transparent);
                         HorizontalLayout {
-                            padding-left: 12px;
+                            padding-left: 8px;
                             padding-right: 8px;
                             spacing: 8px;
                             alignment: start;
+                            ProviderLogo {
+                                y: (parent.height - self.height) / 2;
+                                provider: it.provider;
+                            }
                             Text {
                                 text: it.name;
                                 color: it.is-local ? Theme.local : Theme.text;
@@ -713,6 +753,8 @@ component SettingsPanel {
 
 export component AppWindow inherits Window {
     title: "Llaunchpad";
+    // window/taskbar icon (shown by the OS when the app is running)
+    icon: @image-url("../assets/icon-header.png");
     // fixed size — non resizable (min == max)
     min-width: 760px;
     max-width: 760px;
@@ -739,6 +781,8 @@ export component AppWindow inherits Window {
     in-out property <int> sel-model-index: -1;
     // Ollama server URL (editable, persisted)
     in-out property <string> ollama-host: "http://localhost:11434";
+    // Working directory the agent is launched in (editable, persisted; empty = inherit)
+    in-out property <string> working-dir: "";
 
     // ---- terminal selection ----
     in property <[TerminalItem]> terminals;
@@ -759,6 +803,7 @@ export component AppWindow inherits Window {
     callback restore(int /*agent index*/);
     callback refresh();
     callback test-connection(string /*ollama host url*/);
+    callback pick-directory();
     callback dismiss();
     callback select-terminal(string /*terminal key*/);
 
@@ -862,6 +907,30 @@ export component AppWindow inherits Window {
                 text: "Test";
                 min-width: 70px;
                 clicked => { root.test-connection(root.ollama-host); }
+            }
+        }
+
+        // ---- working directory row ----
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Text {
+                text: "Directory";
+                color: Theme.subtext;
+                font-size: 12px;
+                font-weight: 700;
+                vertical-alignment: center;
+                width: 82px;
+            }
+            dir-input := ThemedInput {
+                text <=> root.working-dir;
+                placeholder-text: "Working directory";
+                horizontal-stretch: 1;
+            }
+            Btn {
+                text: "Browse…";
+                min-width: 90px;
+                clicked => { root.pick-directory(); }
             }
         }
 

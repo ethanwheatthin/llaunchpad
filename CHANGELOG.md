@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Terminal selector in Settings** — choose which terminal emulator hosts CLI agents. The dropdown lists only the emulators installed on the current machine (Terminal.app, iTerm2, Alacritty, WezTerm, kitty on macOS; GNOME Terminal, Konsole, XFCE Terminal, xterm, Alacritty, WezTerm, kitty on Linux; Windows Terminal, Command Prompt, PowerShell on Windows). The "System default" entry is always available and falls back to the historical per-OS behavior. The choice is persisted in `prefs.json` and applied on every subsequent launch. A new `crate::terminal` module owns the enum, install detection (PATH lookup, `.app` bundles, login-shell PATH for GUI processes), and per-platform spawn implementation.
 
+## [0.6.0] - 2026-06-07
+
+### Added
+- **Working directory** — a new *Directory* field lets you launch (or relaunch)
+  an agent in a chosen folder instead of the launcher's own working directory.
+  The value is persisted between runs and validated before launch (a missing
+  path fails with a clear error). GUI agents inherit it via the spawned
+  process's working directory; CLI agents open their terminal there.
+- **Browse… picker** — a native "choose folder" dialog next to the Directory
+  field (FolderBrowserDialog on Windows, `choose folder` on macOS,
+  zenity/kdialog on Linux), seeded at the current value.
+
+### Changed
+- The app now sets its window/taskbar icon (`icon-header.png`) so the running
+  app shows the Llaunchpad logo instead of a default icon.
+
 ## [0.5.0] - 2026-06-01
 
 ### Added

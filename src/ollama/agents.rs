@@ -18,8 +18,11 @@ fn is_gui(name: &str) -> bool {
 
 /// Fetch the supported integrations by parsing `ollama launch --help`.
 pub async fn list_agents() -> Result<Vec<Agent>> {
-    let out = Command::new(crate::ollama::ollama_bin())
-        .args(["launch", "--help"])
+    let mut cmd = Command::new(crate::ollama::ollama_bin());
+    cmd.args(["launch", "--help"]);
+    #[cfg(windows)]
+    cmd.creation_flags(super::CREATE_NO_WINDOW);
+    let out = cmd
         .output()
         .await
         .context("failed to run `ollama launch --help` (is ollama installed?)")?;

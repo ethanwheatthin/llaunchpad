@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
@@ -199,10 +201,115 @@ fn shell_safe_url(url: &str) -> String {
         .collect()
 }
 
+/// Strip characters from a directory path that could break out of the
+/// surrounding double quotes / inject a second command when interpolated into a
+/// shell string. Real paths don't contain these, so dropping them is safe.
+/// Only used for the macOS Terminal path, where the new window does not inherit
+/// our working directory and we must `cd` into it via the shell.
+#[cfg(target_os = "macos")]
+fn shell_safe_dir(dir: &str) -> String {
+    dir.chars()
+        .filter(|c| !"\"`$\\\n\r".contains(*c))
+        .collect()
+}
+
+/// Show the OS-native "choose folder" dialog and return the selected path.
+/// Returns `None` if the user cancels or no dialog backend is available.
+/// `start_dir`, when it points at an existing directory, seeds the dialog's
+/// initial location. This blocks until the dialog closes, so callers should run
+/// it off the UI thread.
+pub fn pick_directory(start_dir: Option<&str>) -> Option<String> {
+    let start = start_dir.filter(|d| !d.is_empty());
+
+    #[cfg(target_os = "macos")]
+    {
+        // `choose folder` returns an alias; convert it to a POSIX path. Seeding
+        // is skipped — a bad `default location` makes osascript error out.
+        let _ = start;
+        let script =
+            "POSIX path of (choose folder with prompt \"Select working directory\")";
+        let out = Command::new("osascript").args(["-e", script]).output().ok()?;
+        if !out.status.success() {
+            return None; // user pressed Cancel
+        }
+        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        return if p.is_empty() { None } else { Some(p) };
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Drive the Win32 folder browser through PowerShell. CREATE_NO_WINDOW
+        // keeps a console from flashing up. The seed path is single-quoted with
+        // `'` doubled so a path can't break out of the string literal.
+        let seed = match start {
+            Some(d) => format!(
+                "$s = '{}'; if (Test-Path $s) {{ $dlg.SelectedPath = $s }}\n",
+                d.replace('\'', "''")
+            ),
+            None => String::new(),
+        };
+        let ps = format!(
+            "Add-Type -AssemblyName System.Windows.Forms | Out-Null\n\
+             $dlg = New-Object System.Windows.Forms.FolderBrowserDialog\n\
+             $dlg.Description = 'Select working directory'\n\
+             {seed}\
+             if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ \
+             [Console]::Out.Write($dlg.SelectedPath) }}"
+        );
+        let mut c = Command::new("powershell");
+        c.args(["-NoProfile", "-STA", "-NonInteractive", "-Command", &ps]);
+        c.creation_flags(super::CREATE_NO_WINDOW);
+        let out = c.output().ok()?;
+        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        return if p.is_empty() { None } else { Some(p) };
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Try zenity, then kdialog. zenity seeds via --filename (trailing slash
+        // tells it the path is a directory).
+        let mut zen = Command::new("zenity");
+        zen.args(["--file-selection", "--directory", "--title=Select working directory"]);
+        if let Some(d) = start {
+            zen.arg(format!("--filename={}/", d.trim_end_matches('/')));
+        }
+        if let Ok(out) = zen.output() {
+            if out.status.success() {
+                let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !p.is_empty() {
+                    return Some(p);
+                }
+            }
+        }
+        let mut kde = Command::new("kdialog");
+        kde.arg("--getexistingdirectory");
+        kde.arg(start.unwrap_or("."));
+        if let Ok(out) = kde.output() {
+            if out.status.success() {
+                let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !p.is_empty() {
+                    return Some(p);
+                }
+            }
+        }
+        return None;
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
 /// Run a shell command line in a new terminal window.
 /// If `ollama_host` is provided it is forwarded as `OLLAMA_HOST` so the agent
 /// connects to the right server.
 fn spawn_in_terminal(cmd: &str, ollama_host: Option<&str>, terminal: &Terminal) -> Result<()> {
+/// connects to the right server. If `working_dir` is provided the command runs
+/// with that directory as its working directory.
+fn spawn_in_terminal(
+    cmd: &str,
+    ollama_host: Option<&str>,
+    working_dir: Option<&str>,
+) -> Result<()> {
     // Prepend OLLAMA_HOST=<url> to the command string for each platform.
     // The host is sanitized before interpolation to guard against shell injection.
     let full_cmd: String;
@@ -222,6 +329,68 @@ fn spawn_in_terminal(cmd: &str, ollama_host: Option<&str>, terminal: &Terminal) 
     // Delegate to the platform-aware Terminal::spawn impl — the
     // per-OS terminal detection lives in `crate::terminal`.
     terminal.spawn(cmd)
+    #[cfg(target_os = "macos")]
+    {
+        // A new Terminal window does not inherit our working directory, so we
+        // `cd` into it from the shell before running the command.
+        let full = match working_dir {
+            Some(dir) if !dir.is_empty() => {
+                format!("cd \"{}\" && {cmd}", shell_safe_dir(dir))
+            }
+            _ => cmd.to_string(),
+        };
+        let script = format!(
+            "tell application \"Terminal\"\nactivate\ndo script \"{}\"\nend tell",
+            full.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+        Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .spawn()
+            .context("failed to open Terminal")?;
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // The spawned terminal (and the bash inside it) inherits the working
+        // directory of the process we launch, so set it directly.
+        let hold = format!("{cmd}; exec ${{SHELL:-/bin/bash}}");
+        let candidates: &[(&str, &[&str])] = &[
+            ("x-terminal-emulator", &["-e", "bash", "-lc"]),
+            ("gnome-terminal", &["--", "bash", "-lc"]),
+            ("konsole", &["-e", "bash", "-lc"]),
+            ("xfce4-terminal", &["-e", "bash", "-lc"]),
+            ("xterm", &["-e", "bash", "-lc"]),
+        ];
+        for (bin, args) in candidates {
+            let mut c = Command::new(bin);
+            c.args(*args).arg(&hold);
+            if let Some(dir) = working_dir {
+                if !dir.is_empty() {
+                    c.current_dir(dir);
+                }
+            }
+            if c.spawn().is_ok() {
+                return Ok(());
+            }
+        }
+        anyhow::bail!("no terminal emulator found (tried gnome-terminal, konsole, xterm…)");
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // The new console started by `start` inherits the current directory of
+        // the cmd process we spawn, so set it directly when a dir is given.
+        let mut cmd_proc = Command::new("cmd");
+        cmd_proc.args(["/C", "start", "cmd", "/K", cmd]);
+        cmd_proc.creation_flags(super::CREATE_NO_WINDOW);
+        if let Some(dir) = working_dir {
+            if !dir.is_empty() {
+                cmd_proc.current_dir(dir);
+            }
+        }
+        cmd_proc.spawn().context("failed to open cmd")?;
+        return Ok(());
+    }
 }
 
 /// Quit a running GUI app (best effort, per platform).
@@ -372,6 +541,13 @@ fn migrate_codex_profiles(model: &str) -> Result<()> {
 /// Codex (GUI app or CLI): `ollama launch` writes a legacy profile config that
 /// current Codex rejects. Configure first (`--config`), migrate the profile into
 /// its own file, then launch Codex ourselves.
+fn launch_codex(
+    agent: &str,
+    is_gui: bool,
+    model: &str,
+    ollama_host: Option<&str>,
+    working_dir: Option<&str>,
+) -> Result<()> {
 fn launch_codex(agent: &str, is_gui: bool, model: &str, ollama_host: Option<&str>, terminal: &Terminal) -> Result<()> {
     // close the GUI app if it is already open (relaunch)
     #[cfg(target_os = "macos")]
@@ -388,6 +564,8 @@ fn launch_codex(agent: &str, is_gui: bool, model: &str, ollama_host: Option<&str
     if let Some(host) = ollama_host {
         cfg_cmd.env("OLLAMA_HOST", host);
     }
+    #[cfg(windows)]
+    cfg_cmd.creation_flags(super::CREATE_NO_WINDOW);
     let _ = cfg_cmd.status();
 
     migrate_codex_profiles(model)?;
@@ -404,10 +582,13 @@ fn launch_codex(agent: &str, is_gui: bool, model: &str, ollama_host: Option<&str
             if let Some(host) = ollama_host {
                 cmd.env("OLLAMA_HOST", host);
             }
+            #[cfg(windows)]
+            cmd.creation_flags(super::CREATE_NO_WINDOW);
             cmd.spawn().context("failed to launch codex-app")?;
         }
     } else {
         // CLI: run codex against the migrated profile in a terminal
+        spawn_in_terminal("codex --profile ollama-launch", ollama_host, working_dir)?;
         spawn_in_terminal("codex --profile ollama-launch", ollama_host, terminal)?;
     }
     Ok(())
@@ -429,8 +610,11 @@ pub fn restore_available(agent: &str) -> bool {
 
 /// Restore an agent to its original (pre-Ollama) profile.
 pub fn restore_agent(agent: &str) -> Result<()> {
-    let status = Command::new(crate::ollama::ollama_bin())
-        .args(["launch", agent, "--restore", "-y"])
+    let mut restore_cmd = Command::new(crate::ollama::ollama_bin());
+    restore_cmd.args(["launch", agent, "--restore", "-y"]);
+    #[cfg(windows)]
+    restore_cmd.creation_flags(super::CREATE_NO_WINDOW);
+    let status = restore_cmd
         .status()
         .with_context(|| format!("failed to restore `{agent}`"))?;
     if !status.success() {
@@ -444,6 +628,13 @@ pub fn restore_agent(agent: &str) -> Result<()> {
 /// Launch (or relaunch) an agent with the given model via `ollama launch`.
 /// `ollama_host` is forwarded as `OLLAMA_HOST` when set, routing the agent
 /// to a custom Ollama server instead of the default localhost.
+/// `working_dir`, when set, is the directory the agent is launched in.
+pub fn launch_agent(
+    agent: &Agent,
+    model: &str,
+    ollama_host: Option<&str>,
+    working_dir: Option<&str>,
+) -> Result<()> {
 pub fn launch_agent(
     agent: &Agent,
     model: &str,
@@ -454,9 +645,20 @@ pub fn launch_agent(
         anyhow::bail!("{} is not installed", agent.display);
     }
 
+    // Normalize the working directory: treat empty as unset, and reject a path
+    // that isn't an existing directory before we try to launch into it.
+    let working_dir = working_dir.filter(|d| !d.is_empty());
+    if let Some(dir) = working_dir {
+        if !std::path::Path::new(dir).is_dir() {
+            anyhow::bail!("working directory does not exist: {dir}");
+        }
+    }
+
     match agent.name.as_str() {
         "codex-app" => return launch_codex("codex-app", true, model, ollama_host, terminal),
         "codex" => return launch_codex("codex", false, model, ollama_host, terminal),
+        "codex-app" => return launch_codex("codex-app", true, model, ollama_host, working_dir),
+        "codex" => return launch_codex("codex", false, model, ollama_host, working_dir),
         _ => {}
     }
 
@@ -471,6 +673,8 @@ pub fn launch_agent(
         if let Some(host) = ollama_host {
             cmd.env("OLLAMA_HOST", host);
         }
+        #[cfg(windows)]
+        cmd.creation_flags(super::CREATE_NO_WINDOW);
         cmd.spawn().with_context(|| format!("failed to launch `{}`", agent.name))?;
     } else {
         // CLI agent: run inside a terminal (absolute path: GUI PATH is minimal)
@@ -480,6 +684,7 @@ pub fn launch_agent(
             agent.name,
             model
         );
+        spawn_in_terminal(&cmd, ollama_host, working_dir)?;
         spawn_in_terminal(&cmd, ollama_host, terminal)?;
     }
     Ok(())

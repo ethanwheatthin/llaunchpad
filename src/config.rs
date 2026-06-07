@@ -15,6 +15,9 @@ pub struct Prefs {
     /// Empty / missing falls back to the platform default.
     #[serde(default)]
     pub terminal: String,
+    /// Working directory the agent is launched in (empty = inherit launcher's cwd)
+    #[serde(default)]
+    pub working_dir: String,
 }
 
 fn default_ollama_host() -> String {
@@ -28,6 +31,7 @@ impl Default for Prefs {
             model: String::new(),
             ollama_host: default_ollama_host(),
             terminal: String::new(),
+            working_dir: String::new(),
         }
     }
 }
