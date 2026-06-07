@@ -198,10 +198,27 @@ fn shell_safe_url(url: &str) -> String {
         .collect()
 }
 
+/// Strip characters from a directory path that could break out of the
+/// surrounding double quotes / inject a second command when interpolated into a
+/// shell string. Real paths don't contain these, so dropping them is safe.
+/// Only used for the macOS Terminal path, where the new window does not inherit
+/// our working directory and we must `cd` into it via the shell.
+#[cfg(target_os = "macos")]
+fn shell_safe_dir(dir: &str) -> String {
+    dir.chars()
+        .filter(|c| !"\"`$\\\n\r".contains(*c))
+        .collect()
+}
+
 /// Run a shell command line in a new terminal window.
 /// If `ollama_host` is provided it is forwarded as `OLLAMA_HOST` so the agent
-/// connects to the right server.
-fn spawn_in_terminal(cmd: &str, ollama_host: Option<&str>) -> Result<()> {
+/// connects to the right server. If `working_dir` is provided the command runs
+/// with that directory as its working directory.
+fn spawn_in_terminal(
+    cmd: &str,
+    ollama_host: Option<&str>,
+    working_dir: Option<&str>,
+) -> Result<()> {
     // Prepend OLLAMA_HOST=<url> to the command string for each platform.
     // The host is sanitized before interpolation to guard against shell injection.
     let full_cmd: String;
@@ -220,9 +237,17 @@ fn spawn_in_terminal(cmd: &str, ollama_host: Option<&str>) -> Result<()> {
 
     #[cfg(target_os = "macos")]
     {
+        // A new Terminal window does not inherit our working directory, so we
+        // `cd` into it from the shell before running the command.
+        let full = match working_dir {
+            Some(dir) if !dir.is_empty() => {
+                format!("cd \"{}\" && {cmd}", shell_safe_dir(dir))
+            }
+            _ => cmd.to_string(),
+        };
         let script = format!(
             "tell application \"Terminal\"\nactivate\ndo script \"{}\"\nend tell",
-            cmd.replace('\\', "\\\\").replace('"', "\\\"")
+            full.replace('\\', "\\\\").replace('"', "\\\"")
         );
         Command::new("osascript")
             .arg("-e")
@@ -233,6 +258,8 @@ fn spawn_in_terminal(cmd: &str, ollama_host: Option<&str>) -> Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
+        // The spawned terminal (and the bash inside it) inherits the working
+        // directory of the process we launch, so set it directly.
         let hold = format!("{cmd}; exec ${{SHELL:-/bin/bash}}");
         let candidates: &[(&str, &[&str])] = &[
             ("x-terminal-emulator", &["-e", "bash", "-lc"]),
@@ -244,6 +271,11 @@ fn spawn_in_terminal(cmd: &str, ollama_host: Option<&str>) -> Result<()> {
         for (bin, args) in candidates {
             let mut c = Command::new(bin);
             c.args(*args).arg(&hold);
+            if let Some(dir) = working_dir {
+                if !dir.is_empty() {
+                    c.current_dir(dir);
+                }
+            }
             if c.spawn().is_ok() {
                 return Ok(());
             }
@@ -252,10 +284,16 @@ fn spawn_in_terminal(cmd: &str, ollama_host: Option<&str>) -> Result<()> {
     }
     #[cfg(target_os = "windows")]
     {
-        Command::new("cmd")
-            .args(["/C", "start", "cmd", "/K", cmd])
-            .spawn()
-            .context("failed to open cmd")?;
+        // The new console started by `start` inherits the current directory of
+        // the cmd process we spawn, so set it directly.
+        let mut c = Command::new("cmd");
+        c.args(["/C", "start", "cmd", "/K", cmd]);
+        if let Some(dir) = working_dir {
+            if !dir.is_empty() {
+                c.current_dir(dir);
+            }
+        }
+        c.spawn().context("failed to open cmd")?;
         return Ok(());
     }
 }
@@ -408,7 +446,13 @@ fn migrate_codex_profiles(model: &str) -> Result<()> {
 /// Codex (GUI app or CLI): `ollama launch` writes a legacy profile config that
 /// current Codex rejects. Configure first (`--config`), migrate the profile into
 /// its own file, then launch Codex ourselves.
-fn launch_codex(agent: &str, is_gui: bool, model: &str, ollama_host: Option<&str>) -> Result<()> {
+fn launch_codex(
+    agent: &str,
+    is_gui: bool,
+    model: &str,
+    ollama_host: Option<&str>,
+    working_dir: Option<&str>,
+) -> Result<()> {
     // close the GUI app if it is already open (relaunch)
     #[cfg(target_os = "macos")]
     if is_gui {
@@ -440,11 +484,16 @@ fn launch_codex(agent: &str, is_gui: bool, model: &str, ollama_host: Option<&str
             if let Some(host) = ollama_host {
                 cmd.env("OLLAMA_HOST", host);
             }
+            if let Some(dir) = working_dir {
+                if !dir.is_empty() {
+                    cmd.current_dir(dir);
+                }
+            }
             cmd.spawn().context("failed to launch codex-app")?;
         }
     } else {
         // CLI: run codex against the migrated profile in a terminal
-        spawn_in_terminal("codex --profile ollama-launch", ollama_host)?;
+        spawn_in_terminal("codex --profile ollama-launch", ollama_host, working_dir)?;
     }
     Ok(())
 }
@@ -480,14 +529,29 @@ pub fn restore_agent(agent: &str) -> Result<()> {
 /// Launch (or relaunch) an agent with the given model via `ollama launch`.
 /// `ollama_host` is forwarded as `OLLAMA_HOST` when set, routing the agent
 /// to a custom Ollama server instead of the default localhost.
-pub fn launch_agent(agent: &Agent, model: &str, ollama_host: Option<&str>) -> Result<()> {
+/// `working_dir`, when set, is the directory the agent is launched in.
+pub fn launch_agent(
+    agent: &Agent,
+    model: &str,
+    ollama_host: Option<&str>,
+    working_dir: Option<&str>,
+) -> Result<()> {
     if !agent_installed(&agent.name) {
         anyhow::bail!("{} is not installed", agent.display);
     }
 
+    // Normalize the working directory: treat empty as unset, and reject a path
+    // that isn't an existing directory before we try to launch into it.
+    let working_dir = working_dir.filter(|d| !d.is_empty());
+    if let Some(dir) = working_dir {
+        if !std::path::Path::new(dir).is_dir() {
+            anyhow::bail!("working directory does not exist: {dir}");
+        }
+    }
+
     match agent.name.as_str() {
-        "codex-app" => return launch_codex("codex-app", true, model, ollama_host),
-        "codex" => return launch_codex("codex", false, model, ollama_host),
+        "codex-app" => return launch_codex("codex-app", true, model, ollama_host, working_dir),
+        "codex" => return launch_codex("codex", false, model, ollama_host, working_dir),
         _ => {}
     }
 
@@ -502,6 +566,9 @@ pub fn launch_agent(agent: &Agent, model: &str, ollama_host: Option<&str>) -> Re
         if let Some(host) = ollama_host {
             cmd.env("OLLAMA_HOST", host);
         }
+        if let Some(dir) = working_dir {
+            cmd.current_dir(dir);
+        }
         cmd.spawn().with_context(|| format!("failed to launch `{}`", agent.name))?;
     } else {
         // CLI agent: run inside a terminal (absolute path: GUI PATH is minimal)
@@ -511,7 +578,7 @@ pub fn launch_agent(agent: &Agent, model: &str, ollama_host: Option<&str>) -> Re
             agent.name,
             model
         );
-        spawn_in_terminal(&cmd, ollama_host)?;
+        spawn_in_terminal(&cmd, ollama_host, working_dir)?;
     }
     Ok(())
 }

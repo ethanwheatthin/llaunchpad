@@ -138,8 +138,9 @@ fn main() -> anyhow::Result<()> {
     let test_gen: Arc<std::sync::atomic::AtomicU64> =
         Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-    // restore ollama_host from prefs
+    // restore ollama_host + working_dir from prefs
     ui.set_ollama_host(prefs.ollama_host.clone().into());
+    ui.set_working_dir(prefs.working_dir.clone().into());
 
     // ---- dismiss banner ----
     {
@@ -242,22 +243,29 @@ fn main() -> anyhow::Result<()> {
         ui.on_launch(move |idx, model| {
             let agent = store.lock().unwrap().get(idx as usize).cloned();
             let model = model.to_string();
-            let host = ui_weak
+            let (host, working_dir) = ui_weak
                 .upgrade()
-                .map(|ui| ui.get_ollama_host().to_string())
+                .map(|ui| {
+                    (
+                        ui.get_ollama_host().to_string(),
+                        ui.get_working_dir().to_string(),
+                    )
+                })
                 .unwrap_or_default();
             if let Some(a) = &agent {
                 config::save(&config::Prefs {
                     agent: a.name.clone(),
                     model: model.clone(),
                     ollama_host: host.clone(),
+                    working_dir: working_dir.clone(),
                 });
             }
             let ui_weak = ui_weak.clone();
             std::thread::spawn(move || {
                 let host_opt = if host.is_empty() { None } else { Some(host.as_str()) };
+                let dir_opt = if working_dir.is_empty() { None } else { Some(working_dir.as_str()) };
                 let (msg, kind) = match agent {
-                    Some(a) => match launch_agent(&a, &model, host_opt) {
+                    Some(a) => match launch_agent(&a, &model, host_opt, dir_opt) {
                         Ok(()) => (format!("✓ {} launched · {}", a.display, model), 1),
                         Err(e) => (format!("✗ {e}"), 2),
                     },

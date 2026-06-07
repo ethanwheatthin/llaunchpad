@@ -473,6 +473,8 @@ export component AppWindow inherits Window {
     in-out property <int> sel-model-index: -1;
     // Ollama server URL (editable, persisted)
     in-out property <string> ollama-host: "http://localhost:11434";
+    // Working directory the agent is launched in (editable, persisted; empty = inherit)
+    in-out property <string> working-dir: "";
 
     // resolved selections
     property <int> agent-idx: sel-agent-index;
@@ -550,6 +552,25 @@ export component AppWindow inherits Window {
                 text: "Test";
                 min-width: 70px;
                 clicked => { root.test-connection(root.ollama-host); }
+            }
+        }
+
+        // ---- working directory row ----
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Text {
+                text: "Directory";
+                color: Theme.subtext;
+                font-size: 12px;
+                font-weight: 700;
+                vertical-alignment: center;
+                width: 82px;
+            }
+            dir-input := ThemedInput {
+                text <=> root.working-dir;
+                placeholder-text: "Working directory (optional — defaults to launcher's)";
+                horizontal-stretch: 1;
             }
         }
 
